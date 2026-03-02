@@ -5,6 +5,7 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
     nonisolated private let completionHandler: (CameraCaptureResult) -> Void
     nonisolated private let stateQueue = DispatchQueue(label: "com.movieshot.captureprocessor.state")
     nonisolated(unsafe) private var rawPhotoData: Data?
+    nonisolated(unsafe) private var processedPhotoData: Data?
 
     init(completion: @escaping (CameraCaptureResult) -> Void) {
         self.completionHandler = completion
@@ -14,8 +15,11 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
         guard error == nil else { return }
         guard let data = photo.fileDataRepresentation() else { return }
         stateQueue.sync {
-            guard photo.isRawPhoto else { return }
-            rawPhotoData = data
+            if photo.isRawPhoto {
+                rawPhotoData = data
+            } else {
+                processedPhotoData = data
+            }
         }
     }
 
@@ -24,7 +28,7 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
             print("PhotoCaptureProcessor: didFinishCaptureFor error: \(error)")
         }
         let result = stateQueue.sync {
-            CameraCaptureResult(rawData: rawPhotoData)
+            CameraCaptureResult(rawData: rawPhotoData, processedData: processedPhotoData)
         }
         let handler = completionHandler
         DispatchQueue.main.async {

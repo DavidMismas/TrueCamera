@@ -1,6 +1,8 @@
 @preconcurrency internal import AVFoundation
 import Combine
 import Foundation
+import ImageIO
+import QuartzCore
 import UIKit
 
 nonisolated struct CameraLens: Identifiable, Hashable, Sendable {
@@ -16,30 +18,19 @@ nonisolated struct CameraLens: Identifiable, Hashable, Sendable {
 
 nonisolated struct CameraCaptureResult: Sendable {
     let rawData: Data?
+    let processedData: Data?
 }
 
 nonisolated enum CameraCaptureFormat: String, CaseIterable, Identifiable, Sendable {
     case appleProRAW
-    case pureRAW
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .appleProRAW:
-            return "ProRAW"
-        case .pureRAW:
-            return "RAW"
+        case .appleProRAW: return "ProRAW"
         }
     }
-}
-
-nonisolated enum ExposureControlMode: String, CaseIterable, Identifiable, Sendable {
-    case auto = "A"
-    case manual = "M"
-    case shutterPriority = "S"
-
-    var id: String { rawValue }
 }
 
 final class CameraService: NSObject, ObservableObject {
@@ -47,9 +38,10 @@ final class CameraService: NSObject, ObservableObject {
         static let hapticsEnabled = "camera.hapticsEnabled"
         static let shutterSoundEnabled = "camera.shutterSoundEnabled"
         static let captureFormat = "camera.captureFormat"
-        static let exposureMode = "camera.exposureMode"
-        static let manualISO = "camera.manualISO"
-        static let manualShutterDuration = "camera.manualShutterDuration"
+        static let saveRAWToLibrary = "camera.saveRAWToLibrary"
+        static let selectedEffectPresetID = "camera.selectedEffectPresetID"
+        static let effectSettingsBlob = "camera.effect.settingsBlob.v2"
+        static let effectPresetsBlob = "camera.effect.userPresetsBlob.v1"
     }
 
     @Published private(set) var authorizationStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
@@ -61,24 +53,20 @@ final class CameraService: NSObject, ObservableObject {
     @Published private(set) var deviceChangeCount = 0
     @Published private(set) var appleProRAWSupported = false
     @Published private(set) var appleProRAWActive = false
-    @Published private(set) var pureRAWSupported = false
-    @Published private(set) var pureRAWActive = false
-    @Published private(set) var manualExposureSupported = false
-    @Published private(set) var manualISORange: ClosedRange<Float> = 25.0...6400.0
-    @Published private(set) var manualShutterRange: ClosedRange<Double> = (1.0 / 8_000.0)...1.0
-    @Published private(set) var currentISO: Float = 100.0
-    @Published private(set) var currentShutterDuration: Double = 1.0 / 120.0
     @Published private(set) var focusPointSupported = false
     @Published private(set) var focusLocked = false
     @Published var hapticsEnabled: Bool {
         didSet {
             UserDefaults.standard.set(hapticsEnabled, forKey: PreferenceKey.hapticsEnabled)
+            if hapticsEnabled {
+                DispatchQueue.main.async { [weak self] in
+                    self?.shutterHapticGenerator.prepare()
+                }
+            }
         }
     }
     @Published var shutterSoundEnabled: Bool {
-        didSet {
-            UserDefaults.standard.set(shutterSoundEnabled, forKey: PreferenceKey.shutterSoundEnabled)
-        }
+        didSet { UserDefaults.standard.set(shutterSoundEnabled, forKey: PreferenceKey.shutterSoundEnabled) }
     }
     @Published var captureFormat: CameraCaptureFormat {
         didSet {
@@ -86,35 +74,31 @@ final class CameraService: NSObject, ObservableObject {
             refreshCaptureConfigurationForCurrentFormat()
         }
     }
-    @Published var exposureMode: ExposureControlMode {
-        didSet {
-            UserDefaults.standard.set(exposureMode.rawValue, forKey: PreferenceKey.exposureMode)
-            applyExposureModeToCurrentDevice()
-        }
+    @Published var saveRAWToLibrary: Bool {
+        didSet { UserDefaults.standard.set(saveRAWToLibrary, forKey: PreferenceKey.saveRAWToLibrary) }
     }
-    @Published var selectedISO: Float {
+    @Published var exposureBias: Float = 0 {
+        didSet { applyExposureBias() }
+    }
+    @Published private(set) var exposureBiasRange: ClosedRange<Float> = -2.0...2.0
+    @Published private(set) var livePreviewImage: UIImage?
+    @Published private(set) var selectedEffectPresetID: String = PhotoEffectLibrary.customPresetID {
+        didSet { UserDefaults.standard.set(selectedEffectPresetID, forKey: PreferenceKey.selectedEffectPresetID) }
+    }
+    @Published private(set) var effectPresets: [PhotoEffectPreset] = [] {
+        didSet { persistEffectPresets(effectPresets) }
+    }
+    @Published var effectSettings: PhotoEffectSettings = .neutral {
         didSet {
-            let clamped = min(max(selectedISO, manualISORange.lowerBound), manualISORange.upperBound)
-            if abs(selectedISO - clamped) > 0.0001 {
-                selectedISO = clamped
+            let normalized = effectSettings.clamped()
+            if normalized != effectSettings {
+                effectSettings = normalized
                 return
             }
-            UserDefaults.standard.set(Double(clamped), forKey: PreferenceKey.manualISO)
-            if exposureMode == .manual {
-                applyExposureModeToCurrentDevice()
-            }
-        }
-    }
-    @Published var selectedShutterDuration: Double {
-        didSet {
-            let clamped = min(max(selectedShutterDuration, manualShutterRange.lowerBound), manualShutterRange.upperBound)
-            if abs(selectedShutterDuration - clamped) > 0.000_000_1 {
-                selectedShutterDuration = clamped
-                return
-            }
-            UserDefaults.standard.set(clamped, forKey: PreferenceKey.manualShutterDuration)
-            if exposureMode == .manual || exposureMode == .shutterPriority {
-                applyExposureModeToCurrentDevice()
+            persistEffectSettings(normalized)
+            let snapshot = normalized
+            previewStateQueue.async { [weak self] in
+                self?.previewEffectSettings = snapshot
             }
         }
     }
@@ -123,34 +107,41 @@ final class CameraService: NSObject, ObservableObject {
     var onPhotoCapture: ((CameraCaptureResult) -> Void)?
 
     private let photoOutput = AVCapturePhotoOutput()
+    nonisolated(unsafe) private let videoDataOutput = AVCaptureVideoDataOutput()
+    private let effectsProcessor = PhotoEffectsProcessor()
     private var currentInput: AVCaptureDeviceInput?
     private var isConfigured = false
     private var captureRotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var captureRotationObservation: NSKeyValueObservation?
 
     private var activeProcessors: [Int64: PhotoCaptureProcessor] = [:]
+    private var isPhotoCaptureInFlight = false
 
     private let backDiscoverySession: AVCaptureDevice.DiscoverySession
     private let frontDiscoverySession: AVCaptureDevice.DiscoverySession
 
     private let sessionQueue = DispatchQueue(label: "com.movieshot.session")
+    private let previewOutputQueue = DispatchQueue(label: "com.movieshot.preview.output")
+    private let previewStateQueue = DispatchQueue(label: "com.movieshot.preview.state")
+    private let shutterHapticGenerator = UIImpactFeedbackGenerator(style: .medium)
     private let tapToContinuousFocusDelay: TimeInterval = 0.75
     private let longPressFocusLockDelay: TimeInterval = 0.25
-    private let shutterPriorityAutoISOUpdateInterval: TimeInterval = 0.18
-    private let shutterPriorityTargetToleranceEV: Float = 0.10
-    private let shutterPriorityGain: Float = 0.50
     private var focusLockRequested = false
     private var pendingFocusLockWorkItem: DispatchWorkItem?
     private var pendingContinuousFocusWorkItem: DispatchWorkItem?
-    private var autoISOAdjustmentTimer: DispatchSourceTimer?
+    nonisolated(unsafe) private var previewEffectSettings: PhotoEffectSettings = .neutral
+    nonisolated(unsafe) private var previewIsFrontCamera = false
+    nonisolated(unsafe) private var previewRenderingEnabled = true
+    nonisolated(unsafe) private var previewOverlayActive = false
+    nonisolated(unsafe) private var lastPreviewRenderTime: CFTimeInterval = 0
 
     var activeCaptureBadgeText: String? {
-        switch captureFormat {
-        case .appleProRAW:
-            return appleProRAWActive ? "ProRAW" : nil
-        case .pureRAW:
-            return pureRAWActive ? "RAW" : nil
-        }
+        appleProRAWActive ? "ProRAW" : nil
+    }
+
+    var isShutterSoundToggleAvailable: Bool {
+        if #available(iOS 18.0, *) { return photoOutput.isShutterSoundSuppressionSupported }
+        return false
     }
 
     override init() {
@@ -164,7 +155,6 @@ final class CameraService: NSObject, ObservableObject {
             mediaType: .video,
             position: .back
         )
-
         let frontTypes: [AVCaptureDevice.DeviceType] = [
             .builtInWideAngleCamera,
             .builtInTrueDepthCamera,
@@ -176,45 +166,49 @@ final class CameraService: NSObject, ObservableObject {
         )
         self.hapticsEnabled = UserDefaults.standard.object(forKey: PreferenceKey.hapticsEnabled) as? Bool ?? true
         self.shutterSoundEnabled = UserDefaults.standard.object(forKey: PreferenceKey.shutterSoundEnabled) as? Bool ?? true
-        let storedExposureModeRaw = UserDefaults.standard.string(forKey: PreferenceKey.exposureMode)
-        self.exposureMode = ExposureControlMode(rawValue: storedExposureModeRaw ?? "") ?? .auto
-        let storedISO = UserDefaults.standard.object(forKey: PreferenceKey.manualISO) as? Double ?? 100.0
-        self.selectedISO = Float(storedISO)
-        let storedShutter = UserDefaults.standard.object(forKey: PreferenceKey.manualShutterDuration) as? Double ?? (1.0 / 120.0)
-        self.selectedShutterDuration = storedShutter
         let storedCaptureFormatRaw = UserDefaults.standard.string(forKey: PreferenceKey.captureFormat)
         self.captureFormat = CameraCaptureFormat(rawValue: storedCaptureFormatRaw ?? "") ?? .appleProRAW
+        self.saveRAWToLibrary = UserDefaults.standard.object(forKey: PreferenceKey.saveRAWToLibrary) as? Bool ?? false
+        let loadedPresets = Self.loadStoredEffectPresets()
+        self.effectPresets = loadedPresets
+        self.effectSettings = Self.loadStoredEffectSettings().clamped()
+        let storedPresetID = UserDefaults.standard.string(forKey: PreferenceKey.selectedEffectPresetID) ?? PhotoEffectLibrary.customPresetID
+        if storedPresetID == PhotoEffectLibrary.customPresetID ||
+            loadedPresets.contains(where: { $0.id == storedPresetID }) {
+            self.selectedEffectPresetID = storedPresetID
+        } else {
+            self.selectedEffectPresetID = PhotoEffectLibrary.customPresetID
+        }
 
         super.init()
         session.sessionPreset = .photo
-
-        // Pre-populate lenses synchronously so the UI is never empty on first render.
-        // DiscoverySession.devices is safe to read on any thread.
         availableLenses = buildLenses(for: .back)
-    }
-
-    func capturePhoto() {
-        guard isSessionRunning else { return }
-
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            self.prepareExposureForCapture {
-                self.capturePhotoNow()
+        previewEffectSettings = effectSettings
+        if hapticsEnabled {
+            DispatchQueue.main.async { [weak self] in
+                self?.shutterHapticGenerator.prepare()
             }
         }
     }
 
-    var isShutterSoundToggleAvailable: Bool {
-        if #available(iOS 18.0, *) {
-            return photoOutput.isShutterSoundSuppressionSupported
+    func capturePhoto() {
+        guard isSessionRunning else { return }
+        if hapticsEnabled {
+            DispatchQueue.main.async { [weak self] in
+                self?.shutterHapticGenerator.impactOccurred(intensity: 0.9)
+                self?.shutterHapticGenerator.prepare()
+            }
         }
-        return false
+        sessionQueue.async { [weak self] in
+            guard let self, !self.isPhotoCaptureInFlight else { return }
+            self.isPhotoCaptureInFlight = true
+            self.capturePhotoNow()
+        }
     }
 
     func requestPermissionIfNeeded() {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         authorizationStatus = status
-
         guard status == .notDetermined else {
             if status == .authorized {
                 configureSessionIfNeeded()
@@ -222,7 +216,6 @@ final class CameraService: NSObject, ObservableObject {
             }
             return
         }
-
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -237,29 +230,28 @@ final class CameraService: NSObject, ObservableObject {
 
     func configureSessionIfNeeded() {
         guard authorizationStatus == .authorized else { return }
-
         sessionQueue.async { [weak self] in
             guard let self, !self.isConfigured else { return }
-
-            // Add output in its own configuration block
             self.session.beginConfiguration()
             if self.session.canAddOutput(self.photoOutput) {
                 self.session.addOutput(self.photoOutput)
                 self.photoOutput.maxPhotoQualityPrioritization = .balanced
             }
+            if self.session.canAddOutput(self.videoDataOutput) {
+                self.session.addOutput(self.videoDataOutput)
+                self.videoDataOutput.alwaysDiscardsLateVideoFrames = true
+                self.videoDataOutput.videoSettings = [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+                ]
+                self.videoDataOutput.setSampleBufferDelegate(self, queue: self.previewOutputQueue)
+            }
             self.updateRAWAvailability(inConfiguration: true)
             self.session.commitConfiguration()
-
             self.isConfigured = true
-
-            // Configure initial input separately (has its own begin/commit)
             let initialPosition: AVCaptureDevice.Position = .back
             let lenses = self.reloadLenses(for: initialPosition)
-            self.configureInput(for: lenses.first)
-
-            DispatchQueue.main.async {
-                self.currentPosition = initialPosition
-            }
+            self.configureInput(for: self.defaultLens(from: lenses))
+            DispatchQueue.main.async { self.currentPosition = initialPosition }
         }
     }
 
@@ -267,19 +259,18 @@ final class CameraService: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self, self.isConfigured, !self.session.isRunning else { return }
             self.session.startRunning()
-            DispatchQueue.main.async {
-                self.isSessionRunning = self.session.isRunning
-            }
+            DispatchQueue.main.async { self.isSessionRunning = self.session.isRunning }
         }
     }
 
     func stopSession() {
         sessionQueue.async { [weak self] in
             guard let self, self.session.isRunning else { return }
-            self.stopAutoISOAdjustment()
             self.session.stopRunning()
+            self.previewOverlayActive = false
             DispatchQueue.main.async {
                 self.isSessionRunning = self.session.isRunning
+                self.livePreviewImage = nil
             }
         }
     }
@@ -289,17 +280,86 @@ final class CameraService: NSObject, ObservableObject {
             guard let self else { return }
             let newPosition: AVCaptureDevice.Position = self.currentPosition == .back ? .front : .back
             let lenses = self.reloadLenses(for: newPosition)
-            self.configureInput(for: lenses.first)
-            DispatchQueue.main.async {
-                self.currentPosition = newPosition
-            }
+            self.configureInput(for: self.defaultLens(from: lenses))
+            DispatchQueue.main.async { self.currentPosition = newPosition }
         }
+    }
+
+    func applyEffectPreset(_ preset: PhotoEffectPreset) {
+        selectedEffectPresetID = preset.id
+        effectSettings = preset.settings.clamped()
+    }
+
+    func resetEffectsToNeutral() {
+        selectedEffectPresetID = PhotoEffectLibrary.customPresetID
+        effectSettings = .neutral
+    }
+
+    func updateEffectSetting(_ update: (inout PhotoEffectSettings) -> Void) {
+        var next = effectSettings
+        update(&next)
+        selectedEffectPresetID = PhotoEffectLibrary.customPresetID
+        effectSettings = next.clamped()
+    }
+
+    func saveCurrentEffectsAsPreset(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        var nextPresets = effectPresets
+        if let index = nextPresets.firstIndex(where: { $0.name.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }) {
+            nextPresets[index].settings = effectSettings.clamped()
+            effectPresets = nextPresets
+            selectedEffectPresetID = nextPresets[index].id
+            return
+        }
+
+        let preset = PhotoEffectPreset(
+            id: UUID().uuidString,
+            name: trimmed,
+            settings: effectSettings.clamped()
+        )
+        nextPresets.append(preset)
+        effectPresets = nextPresets
+        selectedEffectPresetID = preset.id
+    }
+
+    func deleteEffectPreset(_ preset: PhotoEffectPreset) {
+        effectPresets.removeAll { $0.id == preset.id }
+        if selectedEffectPresetID == preset.id {
+            selectedEffectPresetID = PhotoEffectLibrary.customPresetID
+        }
+    }
+
+    func effectSettingsSnapshot() -> PhotoEffectSettings {
+        previewStateQueue.sync { previewEffectSettings }
+    }
+
+    func setLivePreviewEnabled(_ enabled: Bool) {
+        previewStateQueue.async { [weak self] in
+            self?.previewRenderingEnabled = enabled
+        }
+        if !enabled {
+            previewOverlayActive = false
+            livePreviewImage = nil
+        }
+    }
+
+    func buildStyledPhotoData(from rawData: Data?) async -> Data? {
+        guard let rawData else { return nil }
+        let settings = effectSettingsSnapshot()
+        return await Task.detached(priority: .userInitiated) {
+            PhotoEffectsProcessor().renderProcessedJPEG(from: rawData, settings: settings)
+        }.value
+    }
+
+    private func defaultLens(from lenses: [CameraLens]) -> CameraLens? {
+        lenses.first(where: { $0.deviceType == .builtInWideAngleCamera && $0.zoomFactor == 1.0 }) ?? lenses.first
     }
 
     func selectLens(_ lens: CameraLens) {
         sessionQueue.async { [weak self] in
-            guard let self else { return }
-            guard lens.position == self.currentPosition else { return }
+            guard let self, lens.position == self.currentPosition else { return }
             self.configureInput(for: lens)
         }
     }
@@ -312,31 +372,18 @@ final class CameraService: NSObject, ObservableObject {
 
             self.cancelPendingFocusTransitions()
             self.focusLockRequested = lockFocus
-            DispatchQueue.main.async {
-                self.focusLocked = lockFocus
-            }
+            DispatchQueue.main.async { self.focusLocked = lockFocus }
 
-            let point = CGPoint(
-                x: min(max(devicePoint.x, 0.0), 1.0),
-                y: min(max(devicePoint.y, 0.0), 1.0)
-            )
-
+            let point = CGPoint(x: min(max(devicePoint.x, 0), 1), y: min(max(devicePoint.y, 0), 1))
             do {
                 try device.lockForConfiguration()
                 defer { device.unlockForConfiguration() }
-
-                if device.isFocusPointOfInterestSupported {
-                    device.focusPointOfInterest = point
-                }
-
-                // Start with one-shot focus to honor the tapped position.
+                device.focusPointOfInterest = point
                 if device.isFocusModeSupported(.autoFocus) {
                     device.focusMode = .autoFocus
                 } else if device.isFocusModeSupported(.continuousAutoFocus) {
                     device.focusMode = .continuousAutoFocus
                 }
-
-                // Tap returns to tracking mode; long-press keeps a lock.
                 device.isSubjectAreaChangeMonitoringEnabled = !lockFocus
             } catch {
                 print("CameraService: focus error: \(error)")
@@ -353,14 +400,10 @@ final class CameraService: NSObject, ObservableObject {
 
     // MARK: - Private
 
-    /// Builds the lens list without any side-effects. Safe to call from any thread.
     private func buildLenses(for position: AVCaptureDevice.Position) -> [CameraLens] {
         let discovery = position == .back ? backDiscoverySession : frontDiscoverySession
-
-        let uniqueDevices = Dictionary(grouping: discovery.devices, by: \.deviceType)
-            .compactMap { $0.value.first }
-
-        let lenses: [CameraLens] = uniqueDevices.map { device in
+        let uniqueDevices = Dictionary(grouping: discovery.devices, by: \.deviceType).compactMap { $0.value.first }
+        var lenses: [CameraLens] = uniqueDevices.map { device in
             let (name, order) = lensInfo(for: device.deviceType, position: position)
             return CameraLens(
                 id: "\(device.position.rawValue)-\(device.deviceType.rawValue)",
@@ -372,44 +415,52 @@ final class CameraService: NSObject, ObservableObject {
             )
         }
 
+        // Add 35mm and 50mm digital crop lenses from the wide-angle sensor.
+        if position == .back,
+           let wideDevice = uniqueDevices.first(where: { $0.deviceType == .builtInWideAngleCamera }) {
+            let pos = wideDevice.position.rawValue
+            let type = wideDevice.deviceType.rawValue
+            lenses += [
+                CameraLens(id: "\(pos)-\(type)-35mm", name: "35mm",
+                           deviceType: wideDevice.deviceType, position: wideDevice.position,
+                           zoomFactor: 1.5, sortOrder: 30),
+                CameraLens(id: "\(pos)-\(type)-50mm", name: "50mm",
+                           deviceType: wideDevice.deviceType, position: wideDevice.position,
+                           zoomFactor: 2.0, sortOrder: 40),
+            ]
+        }
+
         return lenses.sorted { $0.sortOrder < $1.sortOrder }
     }
 
     private func reloadLenses(for position: AVCaptureDevice.Position) -> [CameraLens] {
         let sorted = buildLenses(for: position)
-        DispatchQueue.main.async {
-            self.availableLenses = sorted
-        }
+        DispatchQueue.main.async { self.availableLenses = sorted }
         return sorted
     }
 
     private func configureInput(for lens: CameraLens?) {
         guard let lens else { return }
-
         guard let device = AVCaptureDevice.default(lens.deviceType, for: .video, position: lens.position)
                 ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: lens.position)
         else { return }
 
         cancelPendingFocusTransitions()
         focusLockRequested = false
-        DispatchQueue.main.async {
-            self.focusLocked = false
-        }
+        DispatchQueue.main.async { self.focusLocked = false }
 
-        defer {
-            DispatchQueue.main.async {
-                self.selectedLens = lens
-            }
-        }
+        defer { DispatchQueue.main.async { self.selectedLens = lens } }
 
-        // Same physical device — just update zoom, no session reconfiguration needed
         if let currentInput, currentInput.device == device {
             applyZoom(lens.zoomFactor, to: device)
             updateFocusCapabilities(for: device)
-            updateManualExposureCapabilities(for: device)
-            applyExposureMode(to: device)
+            updateExposureBiasRange(for: device)
+            applyAutoExposure(to: device)
+            applyExposureBiasToDevice(device)
             updateMaxPhotoDimensions()
             updateRAWAvailability(inConfiguration: false)
+            updatePreviewCameraPosition(isFront: lens.position == .front)
+            updateVideoOutputMirroring()
             return
         }
 
@@ -420,12 +471,10 @@ final class CameraService: NSObject, ObservableObject {
                 session.commitConfiguration()
                 updateMaxPhotoDimensions()
             }
-
             if let currentInput {
                 session.removeInput(currentInput)
                 self.currentInput = nil
             }
-
             guard session.canAddInput(input) else {
                 print("CameraService: canAddInput failed for \(lens.name)")
                 return
@@ -434,17 +483,59 @@ final class CameraService: NSObject, ObservableObject {
             currentInput = input
             applyZoom(lens.zoomFactor, to: device)
             updateFocusCapabilities(for: device)
-            updateManualExposureCapabilities(for: device)
-            applyExposureMode(to: device)
+            updateExposureBiasRange(for: device)
+            applyAutoExposure(to: device)
+            applyExposureBiasToDevice(device)
             updateRAWAvailability(inConfiguration: true)
             setupCaptureRotationCoordinator(for: device)
-
+            updatePreviewCameraPosition(isFront: lens.position == .front)
+            updateVideoOutputMirroring()
             DispatchQueue.main.async {
                 self.activeVideoDevice = device
                 self.deviceChangeCount += 1
             }
         } catch {
             print("CameraService: input error: \(error)")
+        }
+    }
+
+    private func applyAutoExposure(to device: AVCaptureDevice) {
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+        } catch {
+            print("CameraService: auto exposure error: \(error)")
+        }
+    }
+
+    private func applyExposureBias() {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentInput?.device else { return }
+            self.applyExposureBiasToDevice(device)
+        }
+    }
+
+    private func applyExposureBiasToDevice(_ device: AVCaptureDevice) {
+        let bias = min(max(exposureBias, device.minExposureTargetBias), device.maxExposureTargetBias)
+        do {
+            try device.lockForConfiguration()
+            device.setExposureTargetBias(bias, completionHandler: nil)
+            device.unlockForConfiguration()
+        } catch {
+            print("CameraService: exposure bias error: \(error)")
+        }
+    }
+
+    private func updateExposureBiasRange(for device: AVCaptureDevice) {
+        let minBias = device.minExposureTargetBias
+        let maxBias = device.maxExposureTargetBias
+        DispatchQueue.main.async {
+            self.exposureBiasRange = minBias...maxBias
+            let clamped = min(max(self.exposureBias, minBias), maxBias)
+            if self.exposureBias != clamped { self.exposureBias = clamped }
         }
     }
 
@@ -468,18 +559,12 @@ final class CameraService: NSObject, ObservableObject {
     private func scheduleFocusLockIfNeeded(for device: AVCaptureDevice) {
         guard device.isFocusModeSupported(.locked) else {
             focusLockRequested = false
-            DispatchQueue.main.async {
-                self.focusLocked = false
-            }
+            DispatchQueue.main.async { self.focusLocked = false }
             scheduleReturnToContinuousFocusIfNeeded(for: device)
             return
         }
-
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            guard self.focusLockRequested else { return }
-            guard self.currentInput?.device == device else { return }
-
+            guard let self, self.focusLockRequested, self.currentInput?.device == device else { return }
             do {
                 try device.lockForConfiguration()
                 device.focusMode = .locked
@@ -489,19 +574,14 @@ final class CameraService: NSObject, ObservableObject {
                 print("CameraService: focus lock error: \(error)")
             }
         }
-
         pendingFocusLockWorkItem = work
         sessionQueue.asyncAfter(deadline: .now() + longPressFocusLockDelay, execute: work)
     }
 
     private func scheduleReturnToContinuousFocusIfNeeded(for device: AVCaptureDevice) {
         guard device.isFocusModeSupported(.continuousAutoFocus) else { return }
-
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            guard !self.focusLockRequested else { return }
-            guard self.currentInput?.device == device else { return }
-
+            guard let self, !self.focusLockRequested, self.currentInput?.device == device else { return }
             do {
                 try device.lockForConfiguration()
                 device.focusMode = .continuousAutoFocus
@@ -511,207 +591,120 @@ final class CameraService: NSObject, ObservableObject {
                 print("CameraService: focus resume error: \(error)")
             }
         }
-
         pendingContinuousFocusWorkItem = work
         sessionQueue.asyncAfter(deadline: .now() + tapToContinuousFocusDelay, execute: work)
     }
 
     private func updateFocusCapabilities(for device: AVCaptureDevice) {
-        let supported =
-            device.isFocusPointOfInterestSupported &&
+        let supported = device.isFocusPointOfInterestSupported &&
             (device.isFocusModeSupported(.autoFocus) || device.isFocusModeSupported(.continuousAutoFocus))
-
         if !supported {
             focusLockRequested = false
             cancelPendingFocusTransitions()
         }
-
         DispatchQueue.main.async {
             self.focusPointSupported = supported
-            if !supported {
-                self.focusLocked = false
-            }
+            if !supported { self.focusLocked = false }
         }
     }
 
-    private func updateManualExposureCapabilities(for device: AVCaptureDevice) {
-        let supportsManualExposure = device.isExposureModeSupported(.custom)
-        let minISO = Float(device.activeFormat.minISO)
-        let maxISO = Float(device.activeFormat.maxISO)
-        let minDuration = max(1.0 / 24_000.0, CMTimeGetSeconds(device.activeFormat.minExposureDuration))
-        let maxDuration = max(minDuration, CMTimeGetSeconds(device.activeFormat.maxExposureDuration))
-        let currentISO = Float(device.iso)
-        let currentShutter = max(minDuration, CMTimeGetSeconds(device.exposureDuration))
-
-        DispatchQueue.main.async {
-            self.manualExposureSupported = supportsManualExposure
-            self.manualISORange = minISO...maxISO
-            self.manualShutterRange = minDuration...maxDuration
-            self.currentISO = currentISO
-            self.currentShutterDuration = currentShutter
-
-            let clampedISO = min(max(self.selectedISO, minISO), maxISO)
-            if abs(self.selectedISO - clampedISO) > 0.0001 {
-                self.selectedISO = clampedISO
-            }
-
-            let clampedShutter = min(max(self.selectedShutterDuration, minDuration), maxDuration)
-            if abs(self.selectedShutterDuration - clampedShutter) > 0.000_000_1 {
-                self.selectedShutterDuration = clampedShutter
-            }
-
-            if !supportsManualExposure, self.exposureMode != .auto {
-                self.exposureMode = .auto
-            }
+    private func capturePhotoNow() {
+        guard let settings = makePhotoSettings() else {
+            isPhotoCaptureInFlight = false
+            DispatchQueue.main.async { self.onPhotoCapture?(CameraCaptureResult(rawData: nil, processedData: nil)) }
+            return
         }
-    }
-
-    private func applyExposureModeToCurrentDevice() {
-        sessionQueue.async { [weak self] in
-            guard let self, let device = self.currentInput?.device else { return }
-            self.applyExposureMode(to: device)
+        settings.photoQualityPrioritization = .speed
+        if #available(iOS 18.0, *), photoOutput.isShutterSoundSuppressionSupported {
+            settings.isShutterSoundSuppressionEnabled = !shutterSoundEnabled
         }
-    }
-
-    private func applyExposureMode(to device: AVCaptureDevice) {
-        switch exposureMode {
-        case .auto:
-            stopAutoISOAdjustment()
-            do {
-                try device.lockForConfiguration()
-                defer { device.unlockForConfiguration() }
-                if device.isExposureModeSupported(.continuousAutoExposure) {
-                    device.exposureMode = .continuousAutoExposure
+        if let connection = photoOutput.connection(with: .video), connection.isVideoMirroringSupported {
+            connection.isVideoMirrored = currentPosition == .front
+        }
+        // Always capture at the maximum resolution the active format supports.
+        // Query the device directly at capture time so we never rely on a stale cached value.
+        if let device = currentInput?.device {
+            let supported = device.activeFormat.supportedMaxPhotoDimensions
+            if let maxDims = supported.max(by: { $0.width * $0.height < $1.width * $1.height }),
+               maxDims.width > 0 {
+                if photoOutput.maxPhotoDimensions.width != maxDims.width ||
+                   photoOutput.maxPhotoDimensions.height != maxDims.height {
+                    photoOutput.maxPhotoDimensions = maxDims
                 }
-                DispatchQueue.main.async {
-                    self.currentISO = Float(device.iso)
-                    self.currentShutterDuration = max(1.0 / 24_000.0, CMTimeGetSeconds(device.exposureDuration))
-                }
-            } catch {
-                print("CameraService: exposure mode error: \(error)")
-            }
-        case .manual:
-            stopAutoISOAdjustment()
-            applyManualExposure(to: device)
-        case .shutterPriority:
-            startAutoISOAdjustment(for: device)
-            applyShutterPriorityExposure(to: device)
-        }
-    }
-
-    private func applyManualExposure(to device: AVCaptureDevice) {
-        do {
-            try device.lockForConfiguration()
-            defer { device.unlockForConfiguration() }
-
-            guard device.isExposureModeSupported(.custom) else { return }
-            let iso = clampedISO(selectedISO, for: device)
-            let shutterDuration = clampedShutterDuration(selectedShutterDuration, for: device)
-            let duration = CMTimeMakeWithSeconds(shutterDuration, preferredTimescale: 1_000_000_000)
-            device.setExposureModeCustom(duration: duration, iso: iso, completionHandler: nil)
-            DispatchQueue.main.async {
-                self.currentISO = iso
-                self.currentShutterDuration = shutterDuration
-            }
-        } catch {
-            print("CameraService: manual exposure error: \(error)")
-        }
-    }
-
-    private func applyShutterPriorityExposure(to device: AVCaptureDevice) {
-        guard device.isExposureModeSupported(.custom) else { return }
-
-        let shutterDuration = clampedShutterDuration(selectedShutterDuration, for: device)
-        let currentISO = clampedISO(Float(device.iso), for: device)
-        let currentShutter = max(1.0 / 24_000.0, CMTimeGetSeconds(device.exposureDuration))
-        let offset = Float(device.exposureTargetOffset)
-
-        var targetISO = currentISO
-        if abs(offset) > shutterPriorityTargetToleranceEV {
-            // Keep shutter fixed and nudge ISO toward the metered target.
-            let ratio = powf(2.0, offset * shutterPriorityGain)
-            targetISO = clampedISO(currentISO * ratio, for: device)
-        }
-
-        let shouldApply =
-            device.exposureMode != .custom ||
-            abs(currentShutter - shutterDuration) > 0.000_001 ||
-            abs(currentISO - targetISO) > 0.5
-
-        if shouldApply {
-            do {
-                try device.lockForConfiguration()
-                let duration = CMTimeMakeWithSeconds(shutterDuration, preferredTimescale: 1_000_000_000)
-                device.setExposureModeCustom(duration: duration, iso: targetISO, completionHandler: nil)
-                device.unlockForConfiguration()
-            } catch {
-                print("CameraService: shutter priority exposure error: \(error)")
+                settings.maxPhotoDimensions = maxDims
             }
         }
-
-        DispatchQueue.main.async {
-            self.currentISO = targetISO
-            self.currentShutterDuration = shutterDuration
-        }
-    }
-
-    private func startAutoISOAdjustment(for device: AVCaptureDevice) {
-        stopAutoISOAdjustment()
-
-        let timer = DispatchSource.makeTimerSource(queue: sessionQueue)
-        timer.schedule(deadline: .now() + 0.05, repeating: shutterPriorityAutoISOUpdateInterval, leeway: .milliseconds(30))
-        timer.setEventHandler { [weak self] in
+        let captureID = settings.uniqueID
+        let processor = PhotoCaptureProcessor { [weak self] result in
             guard let self else { return }
-            guard self.exposureMode == .shutterPriority else {
-                self.stopAutoISOAdjustment()
-                return
+            self.sessionQueue.async {
+                self.activeProcessors[captureID] = nil
+                self.isPhotoCaptureInFlight = false
+                if result.rawData == nil && result.processedData == nil {
+                    print("CameraService: Photo capture failed (no data)")
+                }
+                DispatchQueue.main.async { self.onPhotoCapture?(result) }
             }
-            guard self.currentInput?.device == device else {
-                self.stopAutoISOAdjustment()
-                return
-            }
-            self.applyShutterPriorityExposure(to: device)
         }
-        autoISOAdjustmentTimer = timer
-        timer.resume()
+        activeProcessors[captureID] = processor
+        photoOutput.capturePhoto(with: settings, delegate: processor)
     }
 
-    private func stopAutoISOAdjustment() {
-        autoISOAdjustmentTimer?.setEventHandler {}
-        autoISOAdjustmentTimer?.cancel()
-        autoISOAdjustmentTimer = nil
+    private func preferredAppleProRAWPixelFormatForCapture() -> OSType? {
+        guard #available(iOS 14.3, *) else { return nil }
+        guard captureFormat == .appleProRAW, photoOutput.isAppleProRAWEnabled else { return nil }
+        return photoOutput.availableRawPhotoPixelFormatTypes.first(where: AVCapturePhotoOutput.isAppleProRAWPixelFormat)
     }
 
-    private func clampedISO(_ value: Float, for device: AVCaptureDevice) -> Float {
-        let minISO = Float(device.activeFormat.minISO)
-        let maxISO = Float(device.activeFormat.maxISO)
-        return min(max(value, minISO), maxISO)
+    private func preferredProcessedFormatForCapture() -> [String: Any]? {
+        let codecs = photoOutput.availablePhotoCodecTypes
+        if codecs.contains(.hevc) {
+            return [AVVideoCodecKey: AVVideoCodecType.hevc]
+        }
+        if codecs.contains(.jpeg) {
+            return [AVVideoCodecKey: AVVideoCodecType.jpeg]
+        }
+        return nil
     }
 
-    private func clampedShutterDuration(_ value: Double, for device: AVCaptureDevice) -> Double {
-        let minDuration = max(1.0 / 24_000.0, CMTimeGetSeconds(device.activeFormat.minExposureDuration))
-        let maxDuration = max(minDuration, CMTimeGetSeconds(device.activeFormat.maxExposureDuration))
-        return min(max(value, minDuration), maxDuration)
+    private func makePhotoSettings() -> AVCapturePhotoSettings? {
+        let processedFormat = preferredProcessedFormatForCapture()
+        guard let rawPixelType = preferredAppleProRAWPixelFormatForCapture() else { return nil }
+        return AVCapturePhotoSettings(rawPixelFormatType: rawPixelType, processedFormat: processedFormat)
     }
 
-    /// 12MP cap: 4032×3024
-    private static let captureMaxPixelCount: Int32 = 4032 * 3024
+    nonisolated private func shouldSkipProcessedPreview(for settings: PhotoEffectSettings) -> Bool {
+        abs(settings.baseExposure) < 0.0001 &&
+            abs(settings.contrast) < 0.0001 &&
+            abs(settings.saturation) < 0.0001 &&
+            abs(settings.vibrance) < 0.0001 &&
+            abs(settings.warmth) < 0.5 &&
+            abs(settings.tint) < 0.5 &&
+            abs(settings.clarity) < 0.0001 &&
+            abs(settings.sharpness) < 0.0001 &&
+            settings.bloomIntensity < 0.0001 &&
+            settings.vignetteIntensity < 0.0001 &&
+            settings.grainAmount < 0.0001 &&
+            settings.hsl == .neutral &&
+            settings.colorGrading == .neutral
+    }
+
+    private func bestLensAfterFormatChange(from previouslySelectedLens: CameraLens?, availableLenses: [CameraLens]) -> CameraLens? {
+        guard let previouslySelectedLens else { return availableLenses.first }
+        if let exactMatch = availableLenses.first(where: { $0.id == previouslySelectedLens.id }) { return exactMatch }
+        if let samePhysicalLens = availableLenses.first(where: {
+            $0.position == previouslySelectedLens.position &&
+            $0.deviceType == previouslySelectedLens.deviceType &&
+            $0.zoomFactor == 1.0
+        }) { return samePhysicalLens }
+        return availableLenses.first
+    }
 
     private func updateMaxPhotoDimensions() {
         guard let device = currentInput?.device else { return }
-
         let supported = device.activeFormat.supportedMaxPhotoDimensions
         guard !supported.isEmpty else { return }
-
-        // Keep all capture formats at 12MP max for stability.
-        let capped = supported
-            .filter { $0.width * $0.height <= Self.captureMaxPixelCount }
-            .max(by: { $0.width * $0.height < $1.width * $1.height })
-        let dimensions = capped ?? supported.min(by: { $0.width * $0.height < $1.width * $1.height })
-        guard let dimensions else { return }
-
-        // Only update if the value actually changed — avoids a crash when the
-        // current value is already valid for the new format.
+        guard let dimensions = supported.max(by: { $0.width * $0.height < $1.width * $1.height }) else { return }
         let current = photoOutput.maxPhotoDimensions
         if current.width != dimensions.width || current.height != dimensions.height {
             photoOutput.maxPhotoDimensions = dimensions
@@ -721,37 +714,45 @@ final class CameraService: NSObject, ObservableObject {
     private func lensInfo(for type: AVCaptureDevice.DeviceType, position: AVCaptureDevice.Position) -> (name: String, sortOrder: Int) {
         if position == .front { return ("Front", 0) }
         switch type {
-        case .builtInUltraWideCamera: return ("14mm", 5)
-        case .builtInWideAngleCamera: return ("24mm", 0)  // sortOrder 0 = default first lens
-        case .builtInTelephotoCamera: return ("Tele", 20)
-        default: return ("Camera", 50)
+        // Sort order follows focal length: ultra-wide < wide < crops (30, 40) < tele
+        case .builtInUltraWideCamera: return ("14mm", 10)
+        case .builtInWideAngleCamera: return ("24mm", 20)
+        case .builtInTelephotoCamera: return ("Tele", 50)
+        default: return ("Camera", 100)
         }
     }
 
     private func setupCaptureRotationCoordinator(for device: AVCaptureDevice) {
         captureRotationObservation?.invalidate()
         captureRotationObservation = nil
-
         let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
         captureRotationCoordinator = coordinator
-
         applyCaptureRotation(coordinator.videoRotationAngleForHorizonLevelCapture)
-
         captureRotationObservation = coordinator.observe(
-            \.videoRotationAngleForHorizonLevelCapture,
-            options: [.new]
+            \.videoRotationAngleForHorizonLevelCapture, options: [.new]
         ) { [weak self] coord, _ in
             let angle = coord.videoRotationAngleForHorizonLevelCapture
-            self?.sessionQueue.async {
-                self?.applyCaptureRotation(angle)
-            }
+            self?.sessionQueue.async { self?.applyCaptureRotation(angle) }
         }
     }
 
     private func applyCaptureRotation(_ angle: CGFloat) {
-        guard let connection = photoOutput.connection(with: .video) else { return }
-        if connection.isVideoRotationAngleSupported(angle) {
-            connection.videoRotationAngle = angle
+        if let photoConnection = photoOutput.connection(with: .video),
+           photoConnection.isVideoRotationAngleSupported(angle) {
+            photoConnection.videoRotationAngle = angle
+        }
+    }
+
+    private func updateVideoOutputMirroring() {
+        if let previewConnection = videoDataOutput.connection(with: .video), previewConnection.isVideoMirroringSupported {
+            // Front-camera mirroring is handled in PhotoEffectsProcessor orientation mapping.
+            previewConnection.isVideoMirrored = false
+        }
+    }
+
+    private func updatePreviewCameraPosition(isFront: Bool) {
+        previewStateQueue.async { [weak self] in
+            self?.previewIsFrontCamera = isFront
         }
     }
 
@@ -759,198 +760,59 @@ final class CameraService: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.updateRAWAvailability(inConfiguration: false)
-
             let lenses = self.reloadLenses(for: self.currentPosition)
             let preferredLens = self.bestLensAfterFormatChange(from: self.selectedLens, availableLenses: lenses)
             self.configureInput(for: preferredLens)
         }
     }
 
-    private func prepareExposureForCapture(_ completion: @escaping () -> Void) {
-        guard let device = currentInput?.device else {
-            completion()
-            return
-        }
-
-        guard device.isExposureModeSupported(.custom) else {
-            completion()
-            return
-        }
-
-        guard exposureMode == .manual || exposureMode == .shutterPriority else {
-            completion()
-            return
-        }
-
-        let shutterDuration = clampedShutterDuration(selectedShutterDuration, for: device)
-        let iso: Float = {
-            switch exposureMode {
-            case .manual:
-                return clampedISO(selectedISO, for: device)
-            case .shutterPriority:
-                return clampedISO(Float(device.iso), for: device)
-            case .auto:
-                return clampedISO(Float(device.iso), for: device)
-            }
-        }()
-        let duration = CMTimeMakeWithSeconds(shutterDuration, preferredTimescale: 1_000_000_000)
-
-        var finished = false
-        let finishIfNeeded: () -> Void = {
-            guard !finished else { return }
-            finished = true
-            completion()
-        }
-
+    private func persistEffectSettings(_ settings: PhotoEffectSettings) {
         do {
-            try device.lockForConfiguration()
-            device.setExposureModeCustom(duration: duration, iso: iso) { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.currentISO = iso
-                    self?.currentShutterDuration = shutterDuration
-                }
-                self?.sessionQueue.async {
-                    finishIfNeeded()
-                }
-            }
-            device.unlockForConfiguration()
+            let data = try JSONEncoder().encode(settings.clamped())
+            UserDefaults.standard.set(data, forKey: PreferenceKey.effectSettingsBlob)
+        } catch {
+            print("CameraService: effect settings encode error: \(error)")
+        }
+    }
 
-            // Safety fallback: avoid a stuck capture if exposure callback is delayed.
-            sessionQueue.asyncAfter(deadline: .now() + 0.4) {
-                finishIfNeeded()
+    private static func loadStoredEffectSettings() -> PhotoEffectSettings {
+        guard let data = UserDefaults.standard.data(forKey: PreferenceKey.effectSettingsBlob) else {
+            return .neutral
+        }
+        do {
+            return try JSONDecoder().decode(PhotoEffectSettings.self, from: data).clamped()
+        } catch {
+            print("CameraService: effect settings decode error: \(error)")
+            return .neutral
+        }
+    }
+
+    private func persistEffectPresets(_ presets: [PhotoEffectPreset]) {
+        do {
+            let data = try JSONEncoder().encode(presets)
+            UserDefaults.standard.set(data, forKey: PreferenceKey.effectPresetsBlob)
+        } catch {
+            print("CameraService: presets encode error: \(error)")
+        }
+    }
+
+    private static func loadStoredEffectPresets() -> [PhotoEffectPreset] {
+        guard let data = UserDefaults.standard.data(forKey: PreferenceKey.effectPresetsBlob) else {
+            return []
+        }
+        do {
+            let decoded = try JSONDecoder().decode([PhotoEffectPreset].self, from: data)
+            return decoded.map { preset in
+                var sanitized = preset
+                sanitized.name = sanitized.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                sanitized.settings = sanitized.settings.clamped()
+                if sanitized.name.isEmpty { sanitized.name = "Preset" }
+                return sanitized
             }
         } catch {
-            print("CameraService: prepare exposure error: \(error)")
-            completion()
+            print("CameraService: presets decode error: \(error)")
+            return []
         }
-    }
-
-    private func capturePhotoNow() {
-        guard let settings = makePhotoSettings() else {
-            DispatchQueue.main.async {
-                self.onPhotoCapture?(CameraCaptureResult(rawData: nil))
-            }
-            return
-        }
-
-        if let connection = photoOutput.connection(with: .video),
-           connection.isVideoMirroringSupported {
-            connection.isVideoMirrored = currentPosition == .front
-        }
-
-        let outputDimensions = photoOutput.maxPhotoDimensions
-        if outputDimensions.width > 0 && outputDimensions.height > 0 {
-            settings.maxPhotoDimensions = outputDimensions
-        }
-
-        let captureID = settings.uniqueID
-        let processor = PhotoCaptureProcessor { [weak self] result in
-            guard let self else { return }
-            self.sessionQueue.async {
-                self.activeProcessors[captureID] = nil
-                if result.rawData == nil {
-                    print("CameraService: Photo capture failed (no data)")
-                }
-                DispatchQueue.main.async {
-                    self.onPhotoCapture?(result)
-                }
-            }
-        }
-
-        activeProcessors[captureID] = processor
-        photoOutput.capturePhoto(with: settings, delegate: processor)
-    }
-
-    private func preferredAppleProRAWPixelFormatForCapture() -> OSType? {
-        guard #available(iOS 14.3, *) else { return nil }
-        guard captureFormat == .appleProRAW, photoOutput.isAppleProRAWEnabled else { return nil }
-        return photoOutput.availableRawPhotoPixelFormatTypes.first(where: { type in
-            AVCapturePhotoOutput.isAppleProRAWPixelFormat(type)
-        })
-    }
-
-    private func preferredPureRAWPixelFormatForCapture() -> OSType? {
-        let rawTypes = photoOutput.availableRawPhotoPixelFormatTypes
-        guard !rawTypes.isEmpty else { return nil }
-
-        if #available(iOS 14.3, *) {
-            return rawTypes.first(where: { !AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) })
-        }
-
-        return rawTypes.first
-    }
-
-    private func makePhotoSettings() -> AVCapturePhotoSettings? {
-        let bracketedSettings: [AVCaptureBracketedStillImageSettings]?
-        if let device = currentInput?.device {
-            bracketedSettings = manualBracketedExposureSettings(for: device)
-        } else {
-            bracketedSettings = nil
-        }
-
-        switch captureFormat {
-        case .appleProRAW:
-            guard let rawPixelType = preferredAppleProRAWPixelFormatForCapture() else { return nil }
-            if let bracketedSettings {
-                return AVCapturePhotoBracketSettings(
-                    rawPixelFormatType: rawPixelType,
-                    processedFormat: nil,
-                    bracketedSettings: bracketedSettings
-                )
-            }
-            return AVCapturePhotoSettings(rawPixelFormatType: rawPixelType, processedFormat: nil)
-        case .pureRAW:
-            guard let rawPixelType = preferredPureRAWPixelFormatForCapture() else { return nil }
-            if let bracketedSettings {
-                return AVCapturePhotoBracketSettings(
-                    rawPixelFormatType: rawPixelType,
-                    processedFormat: nil,
-                    bracketedSettings: bracketedSettings
-                )
-            }
-            return AVCapturePhotoSettings(rawPixelFormatType: rawPixelType, processedFormat: nil)
-        }
-    }
-
-    private func manualBracketedExposureSettings(for device: AVCaptureDevice) -> [AVCaptureBracketedStillImageSettings]? {
-        guard device.isExposureModeSupported(.custom) else { return nil }
-        guard exposureMode == .manual || exposureMode == .shutterPriority else { return nil }
-
-        let iso: Float = {
-            switch exposureMode {
-            case .manual:
-                return clampedISO(selectedISO, for: device)
-            case .shutterPriority:
-                return clampedISO(Float(device.iso), for: device)
-            case .auto:
-                return clampedISO(Float(device.iso), for: device)
-            }
-        }()
-        let shutterDuration = clampedShutterDuration(selectedShutterDuration, for: device)
-        let duration = CMTimeMakeWithSeconds(shutterDuration, preferredTimescale: 1_000_000_000)
-        let manual = AVCaptureManualExposureBracketedStillImageSettings.manualExposureSettings(
-            exposureDuration: duration,
-            iso: iso
-        )
-        return [manual]
-    }
-
-    private func bestLensAfterFormatChange(from previouslySelectedLens: CameraLens?, availableLenses: [CameraLens]) -> CameraLens? {
-        guard let previouslySelectedLens else { return availableLenses.first }
-
-        if let exactMatch = availableLenses.first(where: { $0.id == previouslySelectedLens.id }) {
-            return exactMatch
-        }
-
-        if let samePhysicalLens = availableLenses.first(where: { lens in
-            lens.position == previouslySelectedLens.position &&
-            lens.deviceType == previouslySelectedLens.deviceType &&
-            lens.zoomFactor == 1.0
-        }) {
-            return samePhysicalLens
-        }
-
-        return availableLenses.first
     }
 
     private func updateRAWAvailability(inConfiguration: Bool) {
@@ -958,15 +820,10 @@ final class CameraService: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.appleProRAWSupported = false
                 self.appleProRAWActive = false
-                self.pureRAWSupported = false
-                self.pureRAWActive = false
             }
             return
         }
-
         let appleProRAWSupported = photoOutput.isAppleProRAWSupported
-        let pureRAWSupported = preferredPureRAWPixelFormatForCapture() != nil
-
         let shouldEnableAppleProRAW = appleProRAWSupported && captureFormat == .appleProRAW
         if photoOutput.isAppleProRAWEnabled != shouldEnableAppleProRAW {
             if inConfiguration {
@@ -977,14 +834,50 @@ final class CameraService: NSObject, ObservableObject {
                 session.commitConfiguration()
             }
         }
-
         let appleProRAWActive = shouldEnableAppleProRAW && preferredAppleProRAWPixelFormatForCapture() != nil
-        let pureRAWActive = captureFormat == .pureRAW && preferredPureRAWPixelFormatForCapture() != nil
         DispatchQueue.main.async {
             self.appleProRAWSupported = appleProRAWSupported
             self.appleProRAWActive = appleProRAWActive
-            self.pureRAWSupported = pureRAWSupported
-            self.pureRAWActive = pureRAWActive
+        }
+    }
+}
+
+extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
+    nonisolated func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard output === videoDataOutput else { return }
+        guard previewRenderingEnabled else { return }
+
+        let now = CACurrentMediaTime()
+        if now - lastPreviewRenderTime < (1.0 / 12.0) { return }
+        lastPreviewRenderTime = now
+
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let (settings, isFrontCamera) = previewStateQueue.sync { (previewEffectSettings, previewIsFrontCamera) }
+        if shouldSkipProcessedPreview(for: settings) {
+            if previewOverlayActive {
+                previewOverlayActive = false
+                DispatchQueue.main.async { [weak self] in
+                    self?.livePreviewImage = nil
+                }
+            }
+            return
+        }
+
+        autoreleasepool {
+            guard let previewImage = effectsProcessor.renderPreviewImage(
+                from: pixelBuffer,
+                settings: settings,
+                isFrontCamera: isFrontCamera
+            ) else { return }
+            previewOverlayActive = true
+
+            DispatchQueue.main.async { [weak self] in
+                self?.livePreviewImage = previewImage
+            }
         }
     }
 }

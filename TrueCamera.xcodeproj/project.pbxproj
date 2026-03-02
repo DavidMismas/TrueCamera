@@ -256,6 +256,8 @@
 				DEVELOPMENT_TEAM = AX2Z5LF5SG;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Grain;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
 				INFOPLIST_KEY_NSCameraUsageDescription = "TrueCamera needs camera access to capture photos.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "TrueCamera saves captured photos to your library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "TrueCamera can save captured photos to your library.";
@@ -292,6 +294,8 @@
 				DEVELOPMENT_TEAM = AX2Z5LF5SG;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Grain;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
 				INFOPLIST_KEY_NSCameraUsageDescription = "TrueCamera needs camera access to capture photos.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "TrueCamera saves captured photos to your library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "TrueCamera can save captured photos to your library.";

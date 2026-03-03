@@ -10,7 +10,7 @@ struct CameraPreviewView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
-        view.videoPreviewLayer.videoGravity = .resizeAspectFill
+        view.videoPreviewLayer.videoGravity = .resizeAspect
         view.videoPreviewLayer.session = session
         view.updateActiveDevice(activeDevice)
         view.onTapToFocus = onTapToFocus

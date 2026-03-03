@@ -62,6 +62,20 @@ struct ContentView: View {
         }
     }
 
+    private struct CaptureRequestContext {
+        let effectSettings: PhotoEffectSettings
+        let heifBitDepth: StyledHEIFBitDepth
+        let processingSource: StyledProcessingSource
+        let saveRAWToLibrary: Bool
+    }
+
+    private struct PendingCaptureJob: Identifiable {
+        let id = UUID()
+        let rawData: Data?
+        let processedData: Data?
+        let requestContext: CaptureRequestContext
+    }
+
     private static let editorReferenceImage: UIImage? = {
         for name in ["Image", "image", "bird"] {
             if let image = UIImage(named: name) {
@@ -80,32 +94,46 @@ struct ContentView: View {
     }()
     nonisolated private static let referencePreviewProcessor = PhotoEffectsProcessor()
     nonisolated private static let referenceRenderDebounceNanoseconds: UInt64 = 120_000_000
+    private static let queueFullStatusMessage = "Processing queue is full. Please wait a moment."
 
     @StateObject private var cameraService = CameraService()
     @Environment(\.scenePhase) private var scenePhase
 
-    @State private var isSaving = false
     @State private var statusMessage: String?
     @State private var lastCaptureSucceeded = false
     @State private var controlRotationAngle: Angle = .zero
     @State private var showSettingsSheet = false
     @State private var showEffectsSheet = false
-    @State private var showLensPickerDialog = false
     @State private var renderedReferenceImage: UIImage?
     @State private var referenceRenderTask: Task<Void, Never>?
     @State private var referenceRenderGeneration: UInt64 = 0
     @State private var presetNameDraft = ""
     @State private var captureProcessingStage: CaptureProcessingStage?
-    @State private var captureStageAutoAdvanceTask: Task<Void, Never>?
     @State private var captureStageDismissTask: Task<Void, Never>?
     @State private var processingSpinnerRotation: Double = 0
     @State private var processingPulse = false
+    @State private var pendingCaptureRequestContext: CaptureRequestContext?
+    @State private var pendingCaptureJobs: [PendingCaptureJob] = []
+    @State private var backgroundProcessorTask: Task<Void, Never>?
+    @State private var backgroundProcessingInFlight = false
+    @State private var backgroundQueueBadgeRotation: Double = 0
+    @State private var backgroundQueueBadgePulse = false
+    private let maxPendingBackgroundCaptures = 3
     private let themeTeal = Color(red: 0.07, green: 0.74, blue: 0.70)
     private let themePink = Color(red: 0.95, green: 0.54, blue: 0.75)
     private let themeTextPrimary = Color.white.opacity(0.94)
     private let themeTextSecondary = Color(red: 0.82, green: 0.83, blue: 0.9)
     private let themeBackgroundTop = Color(red: 0.06, green: 0.09, blue: 0.13)
     private let themeBackgroundBottom = Color(red: 0.03, green: 0.05, blue: 0.08)
+
+    private var backgroundQueueIsFull: Bool {
+        let totalPending = pendingCaptureJobs.count + (backgroundProcessingInFlight ? 1 : 0)
+        return totalPending >= maxPendingBackgroundCaptures
+    }
+
+    private var backgroundQueueCount: Int {
+        pendingCaptureJobs.count + (backgroundProcessingInFlight ? 1 : 0)
+    }
 
     var body: some View {
         ZStack {
@@ -141,9 +169,20 @@ struct ContentView: View {
                                 cameraService.focus(at: devicePoint, lockFocus: true)
                             }
                         )
+                        .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                        .overlay(alignment: .top) {
+                            if backgroundQueueCount > 0 {
+                                backgroundQueueIndicator
+                                    .padding(.top, 10)
+                            }
+                        }
+                        .overlay(
+                            Rectangle()
+                                .stroke(themeTeal, lineWidth: 1)
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
 
                     exposureSlider
                         .padding(.top, 14)
@@ -210,8 +249,10 @@ struct ContentView: View {
         }
         .onDisappear {
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
-            captureStageAutoAdvanceTask?.cancel()
             captureStageDismissTask?.cancel()
+            backgroundProcessorTask?.cancel()
+            backgroundProcessorTask = nil
+            backgroundProcessingInFlight = false
         }
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
@@ -228,6 +269,9 @@ struct ContentView: View {
         }
         .onChange(of: cameraService.appleProRAWSupported) { _, _ in
             normalizeCaptureFormatSelection()
+        }
+        .onChange(of: backgroundQueueCount) { oldCount, newCount in
+            handleBackgroundQueueCountChange(from: oldCount, to: newCount)
         }
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
             updateControlRotation(for: UIDevice.current.orientation)
@@ -247,6 +291,9 @@ struct ContentView: View {
                 referenceRenderTask = nil
                 renderedReferenceImage = nil
             }
+        }
+        .onAppear {
+            handleBackgroundQueueCountChange(from: 0, to: backgroundQueueCount)
         }
     }
 
@@ -404,7 +451,17 @@ struct ContentView: View {
 
     private var shutterButton: some View {
         return Button {
-            guard cameraService.isSessionRunning, !isSaving, captureProcessingStage == nil else { return }
+            guard cameraService.isSessionRunning, !cameraService.isCaptureInProgress, captureProcessingStage == nil else { return }
+            guard !backgroundQueueIsFull else {
+                statusMessage = Self.queueFullStatusMessage
+                return
+            }
+            pendingCaptureRequestContext = CaptureRequestContext(
+                effectSettings: cameraService.effectSettingsSnapshot(),
+                heifBitDepth: cameraService.styledHEIFBitDepth,
+                processingSource: cameraService.styledProcessingSource,
+                saveRAWToLibrary: cameraService.saveRAWToLibrary
+            )
             lastCaptureSucceeded = false
             startCaptureProcessingUI()
             cameraService.capturePhoto()
@@ -419,8 +476,8 @@ struct ContentView: View {
                     .animation(.easeInOut(duration: 0.2), value: lastCaptureSucceeded)
             }
         }
-        .disabled(isSaving || captureProcessingStage != nil)
-        .opacity((isSaving || captureProcessingStage != nil) ? 0.72 : 1)
+        .disabled(cameraService.isCaptureInProgress || captureProcessingStage != nil || backgroundQueueIsFull)
+        .opacity((cameraService.isCaptureInProgress || captureProcessingStage != nil || backgroundQueueIsFull) ? 0.72 : 1)
         .rotationEffect(controlRotationAngle)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
         .buttonStyle(.plain)
@@ -441,8 +498,23 @@ struct ContentView: View {
     }
 
     private var lensSelector: some View {
-        Button {
-            showLensPickerDialog = true
+        Menu {
+            if cameraService.availableLenses.isEmpty {
+                Button("No lenses available") {}
+                    .disabled(true)
+            } else {
+                ForEach(cameraService.availableLenses) { lens in
+                    Button {
+                        cameraService.selectLens(lens)
+                    } label: {
+                        if cameraService.selectedLens?.id == lens.id {
+                            Label(lens.name, systemImage: "checkmark")
+                        } else {
+                            Text(lens.name)
+                        }
+                    }
+                }
+            }
         } label: {
             HStack(spacing: 6) {
                 Text(currentLensName)
@@ -453,25 +525,12 @@ struct ContentView: View {
                     .font(.caption2.weight(.bold))
             }
             .foregroundStyle(themePink.opacity(0.95))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
         }
-        .frame(width: 106)
+        .frame(width: 78)
         .disabled(cameraService.availableLenses.isEmpty)
-        .confirmationDialog("Select Lens", isPresented: $showLensPickerDialog, titleVisibility: .visible) {
-            if cameraService.availableLenses.isEmpty {
-                Button("No lenses available") {}
-                    .disabled(true)
-            } else {
-                ForEach(cameraService.availableLenses.reversed()) { lens in
-                    let label = cameraService.selectedLens?.id == lens.id ? "\(lens.name) ✓" : lens.name
-                    Button(label) {
-                        cameraService.selectLens(lens)
-                    }
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
+        .tint(themePink)
         .rotationEffect(controlRotationAngle, anchor: .center)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
         .buttonStyle(.plain)
@@ -1047,28 +1106,80 @@ struct ContentView: View {
                 statusMessage = "Capture failed (missing photo data)."
             }
             lastCaptureSucceeded = false
+            pendingCaptureRequestContext = nil
             return
         }
-        Task { @MainActor in
-            setCaptureStage(.processing)
-            isSaving = true
-            defer { isSaving = false }
-            let styledResource = await cameraService.buildStyledPhotoData(
-                rawData: result.rawData,
-                processedData: result.processedData
+        let requestContext = pendingCaptureRequestContext ?? currentCaptureRequestContextSnapshot()
+        pendingCaptureRequestContext = nil
+        enqueueBackgroundCaptureJob(
+            rawData: result.rawData,
+            processedData: result.processedData,
+            requestContext: requestContext
+        )
+    }
+
+    private func currentCaptureRequestContextSnapshot() -> CaptureRequestContext {
+        CaptureRequestContext(
+            effectSettings: cameraService.effectSettingsSnapshot(),
+            heifBitDepth: cameraService.styledHEIFBitDepth,
+            processingSource: cameraService.styledProcessingSource,
+            saveRAWToLibrary: cameraService.saveRAWToLibrary
+        )
+    }
+
+    private func enqueueBackgroundCaptureJob(
+        rawData: Data?,
+        processedData: Data?,
+        requestContext: CaptureRequestContext
+    ) {
+        pendingCaptureJobs.append(
+            PendingCaptureJob(
+                rawData: rawData,
+                processedData: processedData,
+                requestContext: requestContext
             )
-            let rawDataToSave = cameraService.saveRAWToLibrary ? result.rawData : nil
-            setCaptureStage(.saving)
+        )
+        startBackgroundProcessingIfNeeded()
+    }
+
+    private func startBackgroundProcessingIfNeeded() {
+        guard backgroundProcessorTask == nil else { return }
+        backgroundProcessorTask = Task { @MainActor in
+            await processPendingCaptureJobs()
+        }
+    }
+
+    @MainActor
+    private func processPendingCaptureJobs() async {
+        while !Task.isCancelled, !pendingCaptureJobs.isEmpty {
+            backgroundProcessingInFlight = true
+            let job = pendingCaptureJobs.removeFirst()
+
+            let styledResource = await cameraService.buildStyledPhotoData(
+                rawData: job.rawData,
+                processedData: job.processedData,
+                settings: job.requestContext.effectSettings,
+                preferredHEIFBitDepth: job.requestContext.heifBitDepth,
+                preferredProcessingSource: job.requestContext.processingSource
+            )
+            let rawDataToSave = job.requestContext.saveRAWToLibrary ? job.rawData : nil
             let (saveOk, saveErrorMessage) = await saveToPhotoLibrary(rawData: rawDataToSave, styledResource: styledResource)
             lastCaptureSucceeded = saveOk
-            finishCaptureProcessingUI(success: saveOk)
+
             if saveOk {
-                statusMessage = nil
+                if pendingCaptureJobs.isEmpty, statusMessage == Self.queueFullStatusMessage {
+                    statusMessage = nil
+                }
             } else {
                 statusMessage = photoPermissionDenied
                     ? "Photos permission denied. Enable it in Settings."
                     : "Save failed: \(saveErrorMessage ?? "Unknown Photos error")"
             }
+        }
+        backgroundProcessingInFlight = false
+        backgroundProcessorTask = nil
+        if statusMessage == Self.queueFullStatusMessage {
+            statusMessage = nil
         }
     }
 
@@ -1153,35 +1264,79 @@ struct ContentView: View {
         UIApplication.shared.open(photosURL)
     }
 
+    private var backgroundQueueIndicator: some View {
+        ZStack {
+            Circle()
+                .fill(themeBackgroundTop.opacity(0.78))
+                .frame(width: 34, height: 34)
+            Circle()
+                .stroke(themePink.opacity(0.22), lineWidth: 1)
+                .frame(width: 34, height: 34)
+            Circle()
+                .trim(from: 0.18, to: 0.92)
+                .stroke(themeTeal, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .frame(width: 34, height: 34)
+                .rotationEffect(.degrees(backgroundQueueBadgeRotation))
+                .scaleEffect(backgroundQueueBadgePulse ? 1.06 : 0.95)
+
+            Text("\(backgroundQueueCount)")
+                .font(.caption2.monospacedDigit().weight(.bold))
+                .foregroundStyle(themePink)
+        }
+        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 4)
+    }
+
+    private func handleBackgroundQueueCountChange(from oldCount: Int, to newCount: Int) {
+        if oldCount == 0, newCount > 0 {
+            backgroundQueueBadgeRotation = 0
+            backgroundQueueBadgePulse = false
+            withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                backgroundQueueBadgeRotation = 360
+            }
+            withAnimation(.easeInOut(duration: 0.68).repeatForever(autoreverses: true)) {
+                backgroundQueueBadgePulse = true
+            }
+            return
+        }
+        if oldCount > 0, newCount == 0 {
+            withAnimation(.easeOut(duration: 0.18)) {
+                backgroundQueueBadgeRotation = 0
+                backgroundQueueBadgePulse = false
+            }
+        }
+    }
+
     // MARK: - Processing UI
 
     private func startCaptureProcessingUI() {
-        captureStageAutoAdvanceTask?.cancel()
         captureStageDismissTask?.cancel()
         processingSpinnerRotation = 0
         processingPulse = false
         setCaptureStage(.capturing)
 
-        withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
-            processingSpinnerRotation = 360
+        withAnimation(.linear(duration: 0.26)) {
+            processingSpinnerRotation = 240
         }
-        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+        withAnimation(.easeInOut(duration: 0.22)) {
             processingPulse = true
         }
 
-        captureStageAutoAdvanceTask = Task {
-            try? await Task.sleep(nanoseconds: 350_000_000)
+        captureStageDismissTask = Task {
+            try? await Task.sleep(nanoseconds: 280_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 if captureProcessingStage == .capturing {
-                    setCaptureStage(.processing)
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        captureProcessingStage = nil
+                    }
+                    processingPulse = false
+                    processingSpinnerRotation = 0
                 }
             }
         }
     }
 
     private func finishCaptureProcessingUI(success: Bool) {
-        captureStageAutoAdvanceTask?.cancel()
         setCaptureStage(success ? .done : .failed)
 
         captureStageDismissTask?.cancel()

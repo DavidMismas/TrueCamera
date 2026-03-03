@@ -19,7 +19,7 @@ final class PhotoEffectsProcessor {
     private let exportContext: CIContext
     private let exportColorSpace: CGColorSpace
     private let previewCubeDimension = 14
-    private let exportCubeDimension = 80
+    private let exportCubeDimension = 96
     private let cubeCacheLock = NSLock()
     nonisolated(unsafe) private var colorCubeCache: [ColorCubeKey: Data] = [:]
 
@@ -82,12 +82,14 @@ final class PhotoEffectsProcessor {
             processedData: processedData,
             preferredProcessingSource: preferredProcessingSource
         ) else { return nil }
+        let exportPixelCount = Int64(max(0.0, Double(input.extent.integral.width * input.extent.integral.height)))
         // Grain intentionally excluded from final styled export.
         let graded = apply(
             to: input,
             settings: settings,
             includeGrain: false,
-            cubeDimension: exportCubeDimension
+            cubeDimension: exportCubeDimension,
+            pixelCountHint: exportPixelCount
         )
         let options: [CIImageRepresentationOption: Any] = [
             kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 1.0,
@@ -256,7 +258,8 @@ final class PhotoEffectsProcessor {
         to image: CIImage,
         settings: PhotoEffectSettings,
         includeGrain: Bool,
-        cubeDimension: Int
+        cubeDimension: Int,
+        pixelCountHint: Int64? = nil
     ) -> CIImage {
         var output = image
 
@@ -311,6 +314,17 @@ final class PhotoEffectsProcessor {
         }
 
         if shouldApplyColorCube(for: settings) {
+            if shouldApplyShadowChromaStabilization(
+                for: settings,
+                includeGrain: includeGrain,
+                pixelCountHint: pixelCountHint
+            ) {
+                let stabilizationStrength = shadowChromaStabilizationStrength(
+                    for: settings,
+                    pixelCountHint: pixelCountHint
+                )
+                output = stabilizeShadowChroma(in: output, strength: stabilizationStrength)
+            }
             let sourceTone = output
             output = applyHSLAndColorGrading(settings, to: output, cubeDimension: cubeDimension)
             if shouldPreserveSourceLuminanceAfterGrading(settings) {
@@ -473,7 +487,7 @@ final class PhotoEffectsProcessor {
 
         let data = cube.withUnsafeBufferPointer { Data(buffer: $0) }
         cubeCacheLock.lock()
-        if colorCubeCache.count >= 6 {
+        if colorCubeCache.count >= 4 {
             colorCubeCache.removeAll(keepingCapacity: true)
         }
         colorCubeCache[key] = data
@@ -519,40 +533,131 @@ final class PhotoEffectsProcessor {
         return mix(original, adjusted, t: protection)
     }
 
+    nonisolated private func shouldApplyShadowChromaStabilization(
+        for settings: PhotoEffectSettings,
+        includeGrain: Bool,
+        pixelCountHint: Int64?
+    ) -> Bool {
+        // Final export only: preview keeps real-time behavior and texture.
+        guard !includeGrain else { return false }
+        guard let pixelCountHint, pixelCountHint > 0 else { return false }
+        // 12MP captures are the primary failure mode for deep-shadow color tints.
+        guard pixelCountHint <= 14_500_000 else { return false }
+        return settings.colorGrading.shadows.amount > 0.12 ||
+            (settings.colorGrading.global.amount > 0.20 && settings.colorGrading.shadows.amount > 0.04)
+    }
+
+    nonisolated private func shadowChromaStabilizationStrength(
+        for settings: PhotoEffectSettings,
+        pixelCountHint: Int64?
+    ) -> Double {
+        let shadowStrength = settings.colorGrading.shadows.amount
+        let globalStrength = settings.colorGrading.global.amount * 0.5
+        let gradingStrength = max(shadowStrength, globalStrength)
+        let gradeWeight = smoothstep(0.10, 0.70, gradingStrength)
+
+        guard let pixelCountHint else { return gradeWeight }
+        let resolutionWeight: Double
+        if pixelCountHint <= 13_000_000 {
+            resolutionWeight = 1.0
+        } else if pixelCountHint <= 16_000_000 {
+            resolutionWeight = 0.6
+        } else {
+            resolutionWeight = 0.0
+        }
+        return clamp(gradeWeight * resolutionWeight, 0, 1)
+    }
+
+    nonisolated private func stabilizeShadowChroma(in image: CIImage, strength: Double) -> CIImage {
+        guard strength > 0.0001 else { return image }
+
+        let denoise = CIFilter.noiseReduction()
+        denoise.inputImage = image
+        denoise.noiseLevel = Float(0.006 + (0.020 * strength))
+        denoise.sharpness = Float(max(0.18, 0.32 - (0.14 * strength)))
+        guard let denoised = denoise.outputImage?.cropped(to: image.extent) else { return image }
+
+        guard let shadowMask = makeShadowProtectionMask(from: image, strength: strength) else {
+            return blend(denoised, over: image, amount: 0.12 + (0.22 * strength))
+        }
+
+        let blendWithMask = CIFilter.blendWithMask()
+        blendWithMask.inputImage = denoised
+        blendWithMask.backgroundImage = image
+        blendWithMask.maskImage = shadowMask
+        return blendWithMask.outputImage?.cropped(to: image.extent) ?? image
+    }
+
+    nonisolated private func makeShadowProtectionMask(from image: CIImage, strength: Double) -> CIImage? {
+        let luminance = CIFilter.colorMatrix()
+        luminance.inputImage = image
+        let lumaVector = CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0)
+        luminance.rVector = lumaVector
+        luminance.gVector = lumaVector
+        luminance.bVector = lumaVector
+        luminance.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+        luminance.biasVector = CIVector(x: 0, y: 0, z: 0, w: 0)
+        guard var mask = luminance.outputImage else { return nil }
+
+        let invert = CIFilter.colorInvert()
+        invert.inputImage = mask
+        if let inverted = invert.outputImage {
+            mask = inverted
+        }
+
+        let shape = CIFilter.colorControls()
+        shape.inputImage = mask
+        shape.saturation = 0
+        shape.contrast = Float(1.18 + (0.52 * strength))
+        shape.brightness = Float(-0.05 - (0.10 * strength))
+        if let shaped = shape.outputImage {
+            mask = shaped
+        }
+
+        let clampFilter = CIFilter.colorClamp()
+        clampFilter.inputImage = mask
+        clampFilter.minComponents = CIVector(x: 0, y: 0, z: 0, w: 0)
+        clampFilter.maxComponents = CIVector(x: 1, y: 1, z: 1, w: 1)
+        return clampFilter.outputImage?.cropped(to: image.extent) ?? mask.cropped(to: image.extent)
+    }
+
     nonisolated private func applyColorGrading(to rgb: SIMD3<Double>, grading: ColorGradingSettings) -> SIMD3<Double> {
         var output = rgb
         let saturation = rgbSaturation(output)
         // Avoid tint speckling and blotchy artifacts in near-neutral fog/sky regions.
-        let chromaWeight = smoothstep(0.06, 0.24, saturation)
+        let chromaWeight = smoothstep(0.10, 0.34, saturation)
         guard chromaWeight > 0.0001 else { return output }
 
         let luminance = dot(output, SIMD3<Double>(0.2126, 0.7152, 0.0722))
-        let shadowGuard = smoothstep(0.04, 0.16, luminance)
+        // Very dark values carry the most chroma noise; tinting them causes blotchy patterns.
+        let deepShadowGuard = smoothstep(0.08, 0.24, luminance)
+        let shadowGuard = smoothstep(0.05, 0.18, luminance)
         let highlightGuard = 1 - smoothstep(0.90, 0.99, luminance)
-        let protectedWeight = chromaWeight * shadowGuard * highlightGuard
+        let protectedWeight = chromaWeight * deepShadowGuard * shadowGuard * highlightGuard
 
         if grading.global.amount > 0.0001 {
             output = toneBand(
                 output,
-                toward: hueToneColor(grading.global.hue),
+                toward: hueToneColor(grading.global.hue, saturation: 0.72 + (0.28 * chromaWeight)),
                 t: grading.global.amount * 0.32 * protectedWeight
             )
         }
 
-        let shadowWeight = 1 - smoothstep(0.12, 0.55, luminance)
+        // Keep shadow toning stronger in mid-shadows, not near-black noise floor.
+        let shadowWeight = 1 - smoothstep(0.18, 0.62, luminance)
         let highlightWeight = smoothstep(0.45, 0.88, luminance)
 
         if grading.shadows.amount > 0.0001 {
             output = toneBand(
                 output,
-                toward: hueToneColor(grading.shadows.hue),
+                toward: hueToneColor(grading.shadows.hue, saturation: 0.68 + (0.32 * chromaWeight)),
                 t: grading.shadows.amount * shadowWeight * 0.62 * protectedWeight
             )
         }
         if grading.highlights.amount > 0.0001 {
             output = toneBand(
                 output,
-                toward: hueToneColor(grading.highlights.hue),
+                toward: hueToneColor(grading.highlights.hue, saturation: 0.72 + (0.28 * chromaWeight)),
                 t: grading.highlights.amount * highlightWeight * 0.62 * protectedWeight
             )
         }
@@ -636,9 +741,9 @@ final class PhotoEffectsProcessor {
         return blended * (inLum / outLum)
     }
 
-    nonisolated private func hueToneColor(_ hue: Double) -> SIMD3<Double> {
+    nonisolated private func hueToneColor(_ hue: Double, saturation: Double = 1.0) -> SIMD3<Double> {
         let wrapped = wrapHue(hue)
-        return hslToRgb(h: wrapped, s: 1, l: 0.5)
+        return hslToRgb(h: wrapped, s: clamp(saturation, 0, 1), l: 0.5)
     }
 
     nonisolated private func rgbSaturation(_ rgb: SIMD3<Double>) -> Double {

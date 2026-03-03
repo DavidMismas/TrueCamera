@@ -135,6 +135,7 @@ final class CameraService: NSObject, ObservableObject {
     @Published private(set) var authorizationStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
     @Published private(set) var activeVideoDevice: AVCaptureDevice?
     @Published private(set) var isSessionRunning = false
+    @Published private(set) var isCaptureInProgress = false
     @Published private(set) var availableLenses: [CameraLens] = []
     @Published private(set) var currentPosition: AVCaptureDevice.Position = .back
     @Published private(set) var selectedLens: CameraLens?
@@ -322,6 +323,7 @@ final class CameraService: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self, !self.isPhotoCaptureInFlight else { return }
             self.isPhotoCaptureInFlight = true
+            DispatchQueue.main.async { self.isCaptureInProgress = true }
             self.capturePhotoNow()
         }
     }
@@ -478,6 +480,23 @@ final class CameraService: NSObject, ObservableObject {
         let settings = effectSettingsSnapshot()
         let exportBitDepth = styledHEIFBitDepth
         let processingSource = styledProcessingSource
+        return await buildStyledPhotoData(
+            rawData: rawData,
+            processedData: processedData,
+            settings: settings,
+            preferredHEIFBitDepth: exportBitDepth,
+            preferredProcessingSource: processingSource
+        )
+    }
+
+    func buildStyledPhotoData(
+        rawData: Data?,
+        processedData: Data?,
+        settings: PhotoEffectSettings,
+        preferredHEIFBitDepth: StyledHEIFBitDepth,
+        preferredProcessingSource: StyledProcessingSource
+    ) async -> (data: Data, uniformTypeIdentifier: String)? {
+        guard rawData != nil || processedData != nil else { return nil }
         return await withCheckedContinuation { continuation in
             exportQueue.async { [weak self] in
                 guard let self else {
@@ -488,8 +507,8 @@ final class CameraService: NSObject, ObservableObject {
                     rawData: rawData,
                     processedData: processedData,
                     settings: settings,
-                    preferredHEIFBitDepth: exportBitDepth,
-                    preferredProcessingSource: processingSource
+                    preferredHEIFBitDepth: preferredHEIFBitDepth,
+                    preferredProcessingSource: preferredProcessingSource
                 )
                 continuation.resume(returning: rendered)
             }
@@ -546,31 +565,122 @@ final class CameraService: NSObject, ObservableObject {
     private func buildLenses(for position: AVCaptureDevice.Position) -> [CameraLens] {
         let discovery = position == .back ? backDiscoverySession : frontDiscoverySession
         let uniqueDevices = Dictionary(grouping: discovery.devices, by: \.deviceType).compactMap { $0.value.first }
-        var lenses: [CameraLens] = uniqueDevices.map { device in
-            let (name, order) = lensInfo(for: device.deviceType, position: position)
-            return CameraLens(
-                id: "\(device.position.rawValue)-\(device.deviceType.rawValue)",
-                name: name,
-                deviceType: device.deviceType,
-                position: device.position,
-                zoomFactor: 1.0,
-                sortOrder: order
+        guard position == .back else {
+            return uniqueDevices.map { device in
+                CameraLens(
+                    id: "\(device.position.rawValue)-\(device.deviceType.rawValue)",
+                    name: "Front",
+                    deviceType: device.deviceType,
+                    position: device.position,
+                    zoomFactor: 1.0,
+                    sortOrder: 10
+                )
+            }
+        }
+
+        let ultraDevice = uniqueDevices.first(where: { $0.deviceType == .builtInUltraWideCamera })
+        let wideDevice = uniqueDevices.first(where: { $0.deviceType == .builtInWideAngleCamera })
+        let teleDevice = uniqueDevices.first(where: { $0.deviceType == .builtInTelephotoCamera })
+        var lenses: [CameraLens] = []
+
+        if let ultraDevice {
+            lenses.append(
+                CameraLens(
+                    id: "\(ultraDevice.position.rawValue)-\(ultraDevice.deviceType.rawValue)",
+                    name: "14mm",
+                    deviceType: ultraDevice.deviceType,
+                    position: ultraDevice.position,
+                    zoomFactor: 1.0,
+                    sortOrder: 140
+                )
             )
         }
 
-        // Add 35mm and 50mm digital crop lenses from the wide-angle sensor.
-        if position == .back,
-           let wideDevice = uniqueDevices.first(where: { $0.deviceType == .builtInWideAngleCamera }) {
+        if let wideDevice {
             let pos = wideDevice.position.rawValue
             let type = wideDevice.deviceType.rawValue
-            lenses += [
-                CameraLens(id: "\(pos)-\(type)-35mm", name: "35mm",
-                           deviceType: wideDevice.deviceType, position: wideDevice.position,
-                           zoomFactor: 1.5, sortOrder: 30),
-                CameraLens(id: "\(pos)-\(type)-50mm", name: "50mm",
-                           deviceType: wideDevice.deviceType, position: wideDevice.position,
-                           zoomFactor: 2.0, sortOrder: 40),
-            ]
+            lenses.append(
+                CameraLens(
+                    id: "\(pos)-\(type)",
+                    name: "24mm",
+                    deviceType: wideDevice.deviceType,
+                    position: wideDevice.position,
+                    zoomFactor: 1.0,
+                    sortOrder: 240
+                )
+            )
+            let maxWideZoom = Double(wideDevice.activeFormat.videoMaxZoomFactor)
+            let crop35Zoom = 35.0 / 24.0
+            let crop50Zoom = 50.0 / 24.0
+            if maxWideZoom >= crop35Zoom {
+                lenses.append(
+                    CameraLens(
+                        id: "\(pos)-\(type)-35mm-crop",
+                        name: "35mm crop",
+                        deviceType: wideDevice.deviceType,
+                        position: wideDevice.position,
+                        zoomFactor: CGFloat(crop35Zoom),
+                        sortOrder: 350
+                    )
+                )
+            }
+            if maxWideZoom >= crop50Zoom {
+                lenses.append(
+                    CameraLens(
+                        id: "\(pos)-\(type)-50mm-crop",
+                        name: "50mm crop",
+                        deviceType: wideDevice.deviceType,
+                        position: wideDevice.position,
+                        zoomFactor: CGFloat(crop50Zoom),
+                        sortOrder: 500
+                    )
+                )
+            }
+        }
+
+        if let teleDevice {
+            let teleMM = inferredTeleEquivalentMM(for: teleDevice, relativeTo: wideDevice)
+            let pos = teleDevice.position.rawValue
+            let type = teleDevice.deviceType.rawValue
+            lenses.append(
+                CameraLens(
+                    id: "\(pos)-\(type)",
+                    name: "\(teleMM)mm",
+                    deviceType: teleDevice.deviceType,
+                    position: teleDevice.position,
+                    zoomFactor: 1.0,
+                    sortOrder: teleMM * 10
+                )
+            )
+
+            let maxTeleZoom = Double(teleDevice.activeFormat.videoMaxZoomFactor)
+            if maxTeleZoom >= 1.95 {
+                let teleCropMM = roundedMillimeters(Double(teleMM) * 2.0)
+                lenses.append(
+                    CameraLens(
+                        id: "\(pos)-\(type)-tele-2x-crop",
+                        name: "\(teleCropMM)mm crop",
+                        deviceType: teleDevice.deviceType,
+                        position: teleDevice.position,
+                        zoomFactor: 2.0,
+                        sortOrder: teleCropMM * 10 + 1
+                    )
+                )
+            }
+        }
+
+        // Fallback to a generic wide lens if discovery did not return expected camera types.
+        if lenses.isEmpty, let fallback = uniqueDevices.first {
+            lenses.append(
+                CameraLens(
+                    id: "\(fallback.position.rawValue)-\(fallback.deviceType.rawValue)",
+                    name: "24mm",
+                    deviceType: fallback.deviceType,
+                    position: fallback.position,
+                    zoomFactor: 1.0,
+                    sortOrder: 240
+                )
+            )
         }
 
         return lenses.sorted { $0.sortOrder < $1.sortOrder }
@@ -754,7 +864,10 @@ final class CameraService: NSObject, ObservableObject {
     private func capturePhotoNow() {
         guard let settings = makePhotoSettings() else {
             isPhotoCaptureInFlight = false
-            DispatchQueue.main.async { self.onPhotoCapture?(CameraCaptureResult(rawData: nil, processedData: nil)) }
+            DispatchQueue.main.async {
+                self.isCaptureInProgress = false
+                self.onPhotoCapture?(CameraCaptureResult(rawData: nil, processedData: nil))
+            }
             return
         }
         settings.photoQualityPrioritization = capturePriority.photoQualityPrioritization
@@ -783,7 +896,10 @@ final class CameraService: NSObject, ObservableObject {
                 if result.rawData == nil && result.processedData == nil {
                     print("CameraService: Photo capture failed (no data)")
                 }
-                DispatchQueue.main.async { self.onPhotoCapture?(result) }
+                DispatchQueue.main.async {
+                    self.isCaptureInProgress = false
+                    self.onPhotoCapture?(result)
+                }
             }
         }
         activeProcessors[captureID] = processor
@@ -874,15 +990,25 @@ final class CameraService: NSObject, ObservableObject {
         }) ?? sorted.last
     }
 
-    private func lensInfo(for type: AVCaptureDevice.DeviceType, position: AVCaptureDevice.Position) -> (name: String, sortOrder: Int) {
-        if position == .front { return ("Front", 0) }
-        switch type {
-        // Sort order follows focal length: ultra-wide < wide < crops (30, 40) < tele
-        case .builtInUltraWideCamera: return ("14mm", 10)
-        case .builtInWideAngleCamera: return ("24mm", 20)
-        case .builtInTelephotoCamera: return ("Tele", 50)
-        default: return ("Camera", 100)
+    private func inferredTeleEquivalentMM(for teleDevice: AVCaptureDevice, relativeTo wideDevice: AVCaptureDevice?) -> Int {
+        let baseWideMM = 24.0
+        guard let wideDevice else {
+            return 120
         }
+        let wideFOV = Double(wideDevice.activeFormat.videoFieldOfView)
+        let teleFOV = Double(teleDevice.activeFormat.videoFieldOfView)
+        guard wideFOV > 0, teleFOV > 0 else {
+            return 120
+        }
+        let ratio = wideFOV / teleFOV
+        let estimatedMM = baseWideMM * min(max(ratio, 1.8), 8.5)
+        return roundedMillimeters(estimatedMM)
+    }
+
+    private func roundedMillimeters(_ value: Double) -> Int {
+        let roundedToFive = (value / 5.0).rounded() * 5.0
+        let clamped = min(max(roundedToFive, 10), 300)
+        return Int(clamped)
     }
 
     private func setupCaptureRotationCoordinator(for device: AVCaptureDevice) {

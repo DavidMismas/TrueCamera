@@ -1,8 +1,67 @@
 import Photos
 import SwiftUI
+import UniformTypeIdentifiers
 import UIKit
 
 struct ContentView: View {
+    private enum CaptureProcessingStage: Int {
+        case capturing
+        case processing
+        case saving
+        case done
+        case failed
+
+        var title: String {
+            switch self {
+            case .capturing: return "Capturing ProRAW"
+            case .processing: return "Developing"
+            case .saving: return "Saving"
+            case .done: return "Done"
+            case .failed: return "Failed"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .capturing: return "Capturing full-resolution RAW photo"
+            case .processing: return "Applying style and tone mapping"
+            case .saving: return "Saving to Photos library"
+            case .done: return "Photo saved"
+            case .failed: return "An error occurred during processing"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .capturing: return "camera.aperture"
+            case .processing: return "wand.and.stars"
+            case .saving: return "tray.and.arrow.down.fill"
+            case .done: return "checkmark.circle.fill"
+            case .failed: return "xmark.octagon.fill"
+            }
+        }
+
+        var accentColor: Color {
+            switch self {
+            case .capturing: return Color(red: 0.07, green: 0.74, blue: 0.70)
+            case .processing: return Color(red: 0.95, green: 0.54, blue: 0.75)
+            case .saving: return Color(red: 0.07, green: 0.74, blue: 0.70)
+            case .done: return Color(red: 0.07, green: 0.74, blue: 0.70)
+            case .failed: return Color(red: 0.95, green: 0.54, blue: 0.75)
+            }
+        }
+
+        var progressStep: Int {
+            switch self {
+            case .capturing: return 1
+            case .processing: return 2
+            case .saving: return 3
+            case .done: return 3
+            case .failed: return 1
+            }
+        }
+    }
+
     private static let editorReferenceImage: UIImage? = {
         for name in ["Image", "image", "bird"] {
             if let image = UIImage(named: name) {
@@ -19,7 +78,8 @@ struct ContentView: View {
 
         return nil
     }()
-    nonisolated(unsafe) private static let referencePreviewProcessor = PhotoEffectsProcessor()
+    nonisolated private static let referencePreviewProcessor = PhotoEffectsProcessor()
+    nonisolated private static let referenceRenderDebounceNanoseconds: UInt64 = 120_000_000
 
     @StateObject private var cameraService = CameraService()
     @Environment(\.scenePhase) private var scenePhase
@@ -33,14 +93,28 @@ struct ContentView: View {
     @State private var showLensPickerDialog = false
     @State private var renderedReferenceImage: UIImage?
     @State private var referenceRenderTask: Task<Void, Never>?
-    @State private var referenceRenderInFlight = false
-    @State private var pendingReferenceSettings: PhotoEffectSettings?
     @State private var referenceRenderGeneration: UInt64 = 0
     @State private var presetNameDraft = ""
+    @State private var captureProcessingStage: CaptureProcessingStage?
+    @State private var captureStageAutoAdvanceTask: Task<Void, Never>?
+    @State private var captureStageDismissTask: Task<Void, Never>?
+    @State private var processingSpinnerRotation: Double = 0
+    @State private var processingPulse = false
+    private let themeTeal = Color(red: 0.07, green: 0.74, blue: 0.70)
+    private let themePink = Color(red: 0.95, green: 0.54, blue: 0.75)
+    private let themeTextPrimary = Color.white.opacity(0.94)
+    private let themeTextSecondary = Color(red: 0.82, green: 0.83, blue: 0.9)
+    private let themeBackgroundTop = Color(red: 0.06, green: 0.09, blue: 0.13)
+    private let themeBackgroundBottom = Color(red: 0.03, green: 0.05, blue: 0.08)
 
     var body: some View {
         ZStack {
-            Color(red: 0.055, green: 0.055, blue: 0.06).ignoresSafeArea()
+            LinearGradient(
+                colors: [themeBackgroundTop, themeBackgroundBottom],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
 
             switch cameraService.authorizationStatus {
             case .authorized:
@@ -88,23 +162,41 @@ struct ContentView: View {
 
             case .notDetermined:
                 ProgressView("Waiting for camera permission...")
-                    .tint(.white)
-                    .foregroundStyle(.white.opacity(0.9))
+                    .tint(themeTeal)
+                    .foregroundStyle(themeTextPrimary)
 
             @unknown default:
                 Text("Unknown camera permission state.")
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(themeTextPrimary)
             }
         }
+        .tint(themeTeal)
         .overlay(alignment: .top) {
             if let statusMessage {
                 Text(statusMessage)
                     .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(themeTextPrimary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(.black.opacity(0.55), in: Capsule())
+                    .background(
+                        LinearGradient(
+                            colors: [themeBackgroundTop.opacity(0.92), themeBackgroundBottom.opacity(0.92)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: Capsule()
+                    )
+                    .overlay(
+                        Capsule()
+                            .stroke(themeTeal.opacity(0.35), lineWidth: 1)
+                    )
                     .padding(.top, 16)
+            }
+        }
+        .overlay {
+            if let stage = captureProcessingStage {
+                captureProcessingOverlay(stage: stage)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
         .onAppear {
@@ -118,6 +210,8 @@ struct ContentView: View {
         }
         .onDisappear {
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            captureStageAutoAdvanceTask?.cancel()
+            captureStageDismissTask?.cancel()
         }
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
@@ -146,14 +240,11 @@ struct ContentView: View {
         }
         .onChange(of: showEffectsSheet) { _, isPresented in
             if isPresented {
-                referenceRenderGeneration &+= 1
                 scheduleReferenceRender()
             } else {
                 referenceRenderGeneration &+= 1
                 referenceRenderTask?.cancel()
                 referenceRenderTask = nil
-                referenceRenderInFlight = false
-                pendingReferenceSettings = nil
                 renderedReferenceImage = nil
             }
         }
@@ -165,22 +256,22 @@ struct ContentView: View {
         HStack(spacing: 10) {
             Image(systemName: "sun.min.fill")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.55))
+                .foregroundStyle(themePink.opacity(0.85))
                 .frame(width: 22)
 
             Slider(value: $cameraService.exposureBias, in: cameraService.exposureBiasRange)
-                .tint(.orange)
+                .tint(themeTeal)
 
             Image(systemName: "sun.max.fill")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.55))
+                .foregroundStyle(themePink.opacity(0.85))
                 .frame(width: 22)
 
             Text(cameraService.exposureBias >= 0
                  ? "+\(String(format: "%.1f", cameraService.exposureBias))"
                  : String(format: "%.1f", cameraService.exposureBias))
                 .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(themeTextSecondary)
                 .frame(width: 34, alignment: .trailing)
 
             Button {
@@ -188,7 +279,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "arrow.counterclockwise")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(themePink.opacity(0.85))
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.plain)
@@ -200,7 +291,7 @@ struct ContentView: View {
     private var presetStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                presetIcon(title: "Orig", symbol: "camera", isSelected: cameraService.selectedEffectPresetID == PhotoEffectLibrary.customPresetID) {
+                presetIcon(title: "Original", symbol: "camera", isSelected: cameraService.selectedEffectPresetID == PhotoEffectLibrary.customPresetID) {
                     cameraService.resetEffectsToNeutral()
                 }
                 ForEach(cameraService.effectPresets) { preset in
@@ -226,14 +317,16 @@ struct ContentView: View {
                     .font(.caption2.weight(.semibold))
                     .lineLimit(1)
             }
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
+            .foregroundStyle(isSelected ? themeTeal : themePink.opacity(0.9))
+            .frame(minWidth: 68)
             .padding(.vertical, 8)
-            .background(isSelected ? .orange.opacity(0.26) : .white.opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(isSelected ? .orange.opacity(0.8) : .white.opacity(0.16), lineWidth: 1)
-            )
+            .overlay(alignment: .bottom) {
+                Capsule()
+                    .fill(isSelected ? themeTeal : .clear)
+                    .frame(height: 2)
+                    .padding(.horizontal, 6)
+                    .offset(y: 4)
+            }
         }
         .buttonStyle(.plain)
     }
@@ -243,13 +336,6 @@ struct ContentView: View {
     @ViewBuilder
     private var controls: some View {
         controlButtons
-            .overlay(alignment: .top) {
-                if isSaving {
-                    ProgressView()
-                        .tint(.white)
-                        .padding(.top, -18)
-                }
-            }
     }
 
     private var controlButtons: some View {
@@ -270,11 +356,6 @@ struct ContentView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(.white.opacity(0.08), in: Capsule())
-        .overlay(
-            Capsule()
-                .stroke(.white.opacity(0.14), lineWidth: 1)
-        )
     }
 
     // MARK: - Buttons
@@ -285,13 +366,12 @@ struct ContentView: View {
         } label: {
             Image(systemName: "gearshape.fill")
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(themeTeal)
                 .frame(width: 54, height: 54)
-                .background(.black.opacity(0.45), in: Circle())
-                .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
         }
         .rotationEffect(controlRotationAngle)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
+        .buttonStyle(.plain)
     }
 
     private var effectsButton: some View {
@@ -300,13 +380,12 @@ struct ContentView: View {
         } label: {
             Image(systemName: "camera.filters")
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(themePink)
                 .frame(width: 54, height: 54)
-                .background(.black.opacity(0.45), in: Circle())
-                .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
         }
         .rotationEffect(controlRotationAngle)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
+        .buttonStyle(.plain)
     }
 
     private var cameraSwitchButton: some View {
@@ -315,33 +394,33 @@ struct ContentView: View {
         } label: {
             Image(systemName: "arrow.triangle.2.circlepath.camera")
                 .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(themeTeal)
                 .frame(width: 54, height: 54)
-                .background(.black.opacity(0.45), in: Circle())
-                .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
         }
         .rotationEffect(controlRotationAngle)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
+        .buttonStyle(.plain)
     }
 
     private var shutterButton: some View {
-        Button {
-            guard !isSaving else { return }
+        return Button {
+            guard cameraService.isSessionRunning, !isSaving, captureProcessingStage == nil else { return }
             lastCaptureSucceeded = false
+            startCaptureProcessingUI()
             cameraService.capturePhoto()
         } label: {
             ZStack {
                 Circle()
-                    .stroke(.white, lineWidth: 4)
+                    .stroke(themeTeal.opacity(0.95), lineWidth: 4)
                     .frame(width: 82, height: 82)
                 Circle()
-                    .fill(lastCaptureSucceeded ? .green : .white)
+                    .fill(captureProcessingStage == nil ? (lastCaptureSucceeded ? themePink : themeTeal) : themeTeal.opacity(0.7))
                     .frame(width: 66, height: 66)
                     .animation(.easeInOut(duration: 0.2), value: lastCaptureSucceeded)
             }
         }
-        .disabled(isSaving)
-        .opacity(isSaving ? 0.72 : 1)
+        .disabled(isSaving || captureProcessingStage != nil)
+        .opacity((isSaving || captureProcessingStage != nil) ? 0.72 : 1)
         .rotationEffect(controlRotationAngle)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
         .buttonStyle(.plain)
@@ -353,13 +432,12 @@ struct ContentView: View {
         } label: {
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(themePink)
                 .frame(width: 54, height: 54)
-                .background(.black.opacity(0.45), in: Circle())
-                .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
         }
         .rotationEffect(controlRotationAngle)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
+        .buttonStyle(.plain)
     }
 
     private var lensSelector: some View {
@@ -374,13 +452,11 @@ struct ContentView: View {
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.caption2.weight(.bold))
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(themePink.opacity(0.95))
             .padding(.horizontal, 10)
             .padding(.vertical, 9)
-            .background(.white.opacity(0.14), in: Capsule())
-            .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
         }
-        .frame(width: 106, alignment: .leading)
+        .frame(width: 106)
         .disabled(cameraService.availableLenses.isEmpty)
         .confirmationDialog("Select Lens", isPresented: $showLensPickerDialog, titleVisibility: .visible) {
             if cameraService.availableLenses.isEmpty {
@@ -396,8 +472,9 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .rotationEffect(controlRotationAngle)
+        .rotationEffect(controlRotationAngle, anchor: .center)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
+        .buttonStyle(.plain)
     }
 
     private var currentLensName: String {
@@ -410,17 +487,28 @@ struct ContentView: View {
         VStack(spacing: 12) {
             Image(systemName: "camera.fill")
                 .font(.system(size: 32, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
+                .foregroundStyle(themeTeal)
             Text("Camera access is disabled.")
                 .font(.headline)
-                .foregroundStyle(.white)
+                .foregroundStyle(themeTextPrimary)
             Text("Enable camera in iOS Settings for TrueCamera.")
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(themeTextSecondary)
         }
         .padding(20)
-        .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(
+            LinearGradient(
+                colors: [themeBackgroundTop.opacity(0.9), themeBackgroundBottom.opacity(0.92)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(themePink.opacity(0.3), lineWidth: 1)
+        )
         .padding(20)
     }
 
@@ -436,29 +524,112 @@ struct ContentView: View {
                     }
                 }
 
-                Section("Capture Format") {
-                    Toggle("Save RAW (.dng) to Photos", isOn: $cameraService.saveRAWToLibrary)
-                    Text("Zajem je vedno Apple ProRAW. Efekti se aplicirajo naknadno na ProRAW in izvozi se JPEG (95%). RAW .dng se shrani samo, če je ta opcija vklopljena.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Photo Priority")
+                            .font(.subheadline.weight(.semibold))
+                        Picker("Photo Priority", selection: $cameraService.capturePriority) {
+                            ForEach(PhotoCapturePriority.allCases) { option in
+                                Text(option.label).tag(option)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
 
-                    if !cameraService.appleProRAWSupported {
-                        Text("ProRAW ni podprt na trenutni napravi/leči.")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Max Resolution")
+                            .font(.subheadline.weight(.semibold))
+                        Picker("Max Resolution", selection: $cameraService.resolutionCap) {
+                            ForEach(PhotoResolutionCap.allCases) { option in
+                                Text(option.label).tag(option)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    Toggle("Save RAW (.dng) to Photos", isOn: $cameraService.saveRAWToLibrary)
+                } header: {
+                    Text("Capture")
+                } footer: {
+                    Text("Balanced is typically faster; Quality may improve low-light/detail at the cost of longer processing time. Lower max resolution can reduce capture and post-processing time.")
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Processing Source")
+                            .font(.subheadline.weight(.semibold))
+                        Picker("Styled Processing Source", selection: $cameraService.styledProcessingSource) {
+                            ForEach(StyledProcessingSource.allCases) { source in
+                                Text(source.shortLabel).tag(source)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("HEIF Bit Depth")
+                            .font(.subheadline.weight(.semibold))
+                        Picker("Styled HEIF Bit Depth", selection: $cameraService.styledHEIFBitDepth) {
+                            ForEach(StyledHEIFBitDepth.allCases) { bitDepth in
+                                Text(bitDepth.shortLabel).tag(bitDepth)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                } header: {
+                    Text("Styled Export")
+                } footer: {
+                    Text("ProRAW source gives best quality. Processed source is faster. 10-bit HEIF keeps smoother gradients; 8-bit exports faster and smaller.")
+                }
+
+                if !cameraService.appleProRAWSupported {
+                    Section("Compatibility") {
+                        Text("ProRAW is not supported on the current device/lens.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                 }
+
+                Section("Format") {
+                    Text("Capture uses Apple ProRAW at \(cameraService.resolutionCap.label) resolution.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("RAW .dng is stored only when enabled above.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                }
             }
+            .tint(themeTeal)
+            .scrollContentBackground(.hidden)
+            .background(
+                LinearGradient(
+                    colors: [themeBackgroundTop, themeBackgroundBottom],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+            )
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { showSettingsSheet = false }
+                        .foregroundStyle(themePink)
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
+    }
+
+    private var selectedUserPreset: PhotoEffectPreset? {
+        cameraService.effectPresets.first(where: { $0.id == cameraService.selectedEffectPresetID })
+    }
+
+    private var selectedPresetHasUnsavedChanges: Bool {
+        guard let selectedUserPreset else { return false }
+        return selectedUserPreset.settings.clamped() != cameraService.effectSettings.clamped()
     }
 
     private var effectsSheet: some View {
@@ -474,7 +645,7 @@ struct ContentView: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 presetIcon(
-                                    title: "Orig",
+                                    title: "Original",
                                     symbol: "camera",
                                     isSelected: cameraService.selectedEffectPresetID == PhotoEffectLibrary.customPresetID
                                 ) {
@@ -498,11 +669,18 @@ struct ContentView: View {
                             TextField("Preset name", text: $presetNameDraft)
                                 .textInputAutocapitalization(.words)
                                 .disableAutocorrection(true)
-                            Button("Save") {
+                            Button("Save New") {
                                 cameraService.saveCurrentEffectsAsPreset(named: presetNameDraft)
                                 presetNameDraft = ""
                             }
                             .disabled(presetNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                            if selectedUserPreset != nil {
+                                Button("Update") {
+                                    cameraService.updateSelectedPresetFromCurrentSettings()
+                                }
+                                .disabled(!selectedPresetHasUnsavedChanges)
+                            }
                         }
 
                         ForEach(cameraService.effectPresets) { preset in
@@ -512,13 +690,14 @@ struct ContentView: View {
                                 Spacer()
                                 if cameraService.selectedEffectPresetID == preset.id {
                                     Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(.green)
+                                        .foregroundStyle(themeTeal)
                                 }
                                 Button(role: .destructive) {
                                     cameraService.deleteEffectPreset(preset)
                                 } label: {
                                     Image(systemName: "trash")
                                 }
+                                .buttonStyle(.borderless)
                             }
                         }
                     }
@@ -533,6 +712,16 @@ struct ContentView: View {
                             title: "Contrast",
                             value: effectBinding(\.contrast),
                             range: PhotoEffectSettings.contrastRange
+                        )
+                        effectSlider(
+                            title: "Highlights",
+                            value: effectBinding(\.highlights),
+                            range: PhotoEffectSettings.highlightsRange
+                        )
+                        effectSlider(
+                            title: "Shadows",
+                            value: effectBinding(\.shadows),
+                            range: PhotoEffectSettings.shadowsRange
                         )
                         effectSlider(
                             title: "Clarity",
@@ -669,6 +858,16 @@ struct ContentView: View {
                     }
                 }
             }
+            .tint(themeTeal)
+            .scrollContentBackground(.hidden)
+            .background(
+                LinearGradient(
+                    colors: [themeBackgroundTop, themeBackgroundBottom],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+            )
             .navigationTitle("Effects")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -677,20 +876,22 @@ struct ContentView: View {
                         cameraService.resetEffectsToNeutral()
                         scheduleReferenceRender()
                     }
+                    .foregroundStyle(themePink)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { showEffectsSheet = false }
+                        .foregroundStyle(themePink)
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
 
     private var referencePreview: some View {
         return ZStack {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.black.opacity(0.28))
+                .fill(themeBackgroundBottom.opacity(0.55))
 
             if let referenceImage = renderedReferenceImage ?? Self.editorReferenceImage {
                 Image(uiImage: referenceImage)
@@ -705,7 +906,7 @@ struct ContentView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(themeTextSecondary)
             }
         }
         .frame(maxWidth: .infinity)
@@ -713,51 +914,33 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(.white.opacity(0.16), lineWidth: 1)
+                .stroke(themePink.opacity(0.32), lineWidth: 1)
         )
     }
 
     private func scheduleReferenceRender() {
         guard showEffectsSheet, let sourceImage = Self.editorReferenceImage else { return }
-        pendingReferenceSettings = cameraService.effectSettings
-        if referenceRenderInFlight { return }
-        referenceRenderInFlight = true
-        runReferenceRenderLoop(sourceImage: sourceImage)
-    }
-
-    @MainActor
-    private func runReferenceRenderLoop(sourceImage: UIImage) {
-        guard showEffectsSheet else {
-            referenceRenderInFlight = false
-            pendingReferenceSettings = nil
-            return
-        }
-        guard let settings = pendingReferenceSettings else {
-            referenceRenderInFlight = false
-            return
-        }
-        pendingReferenceSettings = nil
+        let settings = cameraService.effectSettings
+        referenceRenderGeneration &+= 1
         let generation = referenceRenderGeneration
 
+        referenceRenderTask?.cancel()
         referenceRenderTask = Task.detached(priority: .userInitiated) {
+            try? await Task.sleep(nanoseconds: Self.referenceRenderDebounceNanoseconds)
+            guard !Task.isCancelled else { return }
+            let shouldRender = await MainActor.run { generation == referenceRenderGeneration && showEffectsSheet }
+            guard shouldRender else { return }
+
             let rendered = Self.referencePreviewProcessor.renderReferencePreview(
                 from: sourceImage,
                 settings: settings,
-                maxDimension: 320,
-                includeGrain: true
+                maxDimension: 220,
+                includeGrain: false
             )
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard generation == referenceRenderGeneration, showEffectsSheet else {
-                    referenceRenderInFlight = false
-                    return
-                }
+                guard generation == referenceRenderGeneration, showEffectsSheet else { return }
                 renderedReferenceImage = rendered
-                if pendingReferenceSettings != nil {
-                    runReferenceRenderLoop(sourceImage: sourceImage)
-                } else {
-                    referenceRenderInFlight = false
-                }
             }
         }
     }
@@ -813,9 +996,10 @@ struct ContentView: View {
         value: Binding<Double>,
         range: ClosedRange<Double>,
         decimals: Int = 2,
-        tint: Color = .orange
+        tint: Color? = nil
     ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let sliderTint = tint ?? themeTeal
+        return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
                 Spacer()
@@ -824,7 +1008,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: value, in: range)
-                .tint(tint)
+                .tint(sliderTint)
                 .contentShape(Rectangle())
                 .padding(.vertical, 2)
         }
@@ -855,22 +1039,29 @@ struct ContentView: View {
     // MARK: - Capture result handling
 
     private func handleCaptureResult(_ result: CameraCaptureResult) {
-        guard let rawData = result.rawData else {
+        guard result.rawData != nil || result.processedData != nil else {
+            finishCaptureProcessingUI(success: false)
             if let unavailableMessage = unavailableCaptureFormatMessage {
                 statusMessage = unavailableMessage
             } else {
-                statusMessage = "Capture failed (missing ProRAW data)."
+                statusMessage = "Capture failed (missing photo data)."
             }
             lastCaptureSucceeded = false
             return
         }
         Task { @MainActor in
+            setCaptureStage(.processing)
             isSaving = true
             defer { isSaving = false }
-            let styledData = await cameraService.buildStyledPhotoData(from: rawData)
-            let rawDataToSave = cameraService.saveRAWToLibrary ? rawData : nil
-            let (saveOk, saveErrorMessage) = await saveToPhotoLibrary(rawData: rawDataToSave, styledData: styledData)
+            let styledResource = await cameraService.buildStyledPhotoData(
+                rawData: result.rawData,
+                processedData: result.processedData
+            )
+            let rawDataToSave = cameraService.saveRAWToLibrary ? result.rawData : nil
+            setCaptureStage(.saving)
+            let (saveOk, saveErrorMessage) = await saveToPhotoLibrary(rawData: rawDataToSave, styledResource: styledResource)
             lastCaptureSucceeded = saveOk
+            finishCaptureProcessingUI(success: saveOk)
             if saveOk {
                 statusMessage = nil
             } else {
@@ -884,18 +1075,21 @@ struct ContentView: View {
     private var unavailableCaptureFormatMessage: String? {
         switch cameraService.captureFormat {
         case .appleProRAW:
-            return cameraService.appleProRAWActive ? nil : "ProRAW ni na voljo za izbrano kamero/lečo."
+            return cameraService.appleProRAWActive ? nil : "ProRAW is not available for the selected camera/lens."
         }
     }
 
     // MARK: - Photos library
 
-    private func saveToPhotoLibrary(rawData: Data?, styledData: Data?) async -> (Bool, String?) {
+    private func saveToPhotoLibrary(
+        rawData: Data?,
+        styledResource: (data: Data, uniformTypeIdentifier: String)?
+    ) async -> (Bool, String?) {
         let authStatus = await ensurePhotoWriteAuthorization()
         guard authStatus == .authorized || authStatus == .limited else {
             return (false, "No Photos write permission")
         }
-        guard rawData != nil || styledData != nil else { return (false, "No photo data to save") }
+        guard rawData != nil || styledResource != nil else { return (false, "No photo data to save") }
 
         var tempPhotoFileURL: URL?
         if let rawData {
@@ -908,13 +1102,15 @@ struct ContentView: View {
         return await withCheckedContinuation { continuation in
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
-                if let styledData {
-                    request.addResource(with: .photo, data: styledData, options: nil)
+                if let styledResource {
+                    let options = PHAssetResourceCreationOptions()
+                    options.uniformTypeIdentifier = normalizedOutputUTI(styledResource.uniformTypeIdentifier)
+                    request.addResource(with: .photo, data: styledResource.data, options: options)
                 }
                 if let tempPhotoFileURL {
                     let options = PHAssetResourceCreationOptions()
                     options.shouldMoveFile = true
-                    let rawResourceType: PHAssetResourceType = styledData == nil ? .photo : .alternatePhoto
+                    let rawResourceType: PHAssetResourceType = styledResource == nil ? .photo : .alternatePhoto
                     request.addResource(with: rawResourceType, fileURL: tempPhotoFileURL, options: options)
                 }
             }, completionHandler: { success, error in
@@ -925,6 +1121,16 @@ struct ContentView: View {
                 continuation.resume(returning: (success, error?.localizedDescription))
             })
         }
+    }
+
+    private func normalizedOutputUTI(_ candidate: String) -> String {
+        if candidate == UTType.jpeg.identifier || candidate == "public.jpeg" {
+            return UTType.jpeg.identifier
+        }
+        if candidate == UTType.heic.identifier || candidate == "public.heic" {
+            return UTType.heic.identifier
+        }
+        return UTType.heic.identifier
     }
 
     private func writeRawTempFile(_ data: Data) async -> URL? {
@@ -945,6 +1151,146 @@ struct ContentView: View {
     private func openSystemPhotosApp() {
         guard let photosURL = URL(string: "photos-redirect://") else { return }
         UIApplication.shared.open(photosURL)
+    }
+
+    // MARK: - Processing UI
+
+    private func startCaptureProcessingUI() {
+        captureStageAutoAdvanceTask?.cancel()
+        captureStageDismissTask?.cancel()
+        processingSpinnerRotation = 0
+        processingPulse = false
+        setCaptureStage(.capturing)
+
+        withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+            processingSpinnerRotation = 360
+        }
+        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+            processingPulse = true
+        }
+
+        captureStageAutoAdvanceTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if captureProcessingStage == .capturing {
+                    setCaptureStage(.processing)
+                }
+            }
+        }
+    }
+
+    private func finishCaptureProcessingUI(success: Bool) {
+        captureStageAutoAdvanceTask?.cancel()
+        setCaptureStage(success ? .done : .failed)
+
+        captureStageDismissTask?.cancel()
+        captureStageDismissTask = Task {
+            try? await Task.sleep(nanoseconds: 580_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.22)) {
+                    captureProcessingStage = nil
+                }
+                processingPulse = false
+                processingSpinnerRotation = 0
+            }
+        }
+    }
+
+    private func setCaptureStage(_ stage: CaptureProcessingStage) {
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+            captureProcessingStage = stage
+        }
+    }
+
+    @ViewBuilder
+    private func captureProcessingOverlay(stage: CaptureProcessingStage) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(themeBackgroundBottom.opacity(0.7))
+                .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                ZStack {
+                    Circle()
+                        .stroke(.white.opacity(0.14), lineWidth: 6)
+                        .frame(width: 84, height: 84)
+                    Circle()
+                        .trim(from: 0.16, to: 0.92)
+                        .stroke(
+                            AngularGradient(
+                                colors: [themePink.opacity(0.2), stage.accentColor, themeTeal.opacity(0.95)],
+                                center: .center
+                            ),
+                            style: StrokeStyle(lineWidth: 6, lineCap: .round)
+                        )
+                        .frame(width: 84, height: 84)
+                        .rotationEffect(.degrees(processingSpinnerRotation))
+                        .scaleEffect(processingPulse ? 1.06 : 0.95)
+
+                    Image(systemName: stage.symbol)
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(stage.accentColor)
+                }
+
+                VStack(spacing: 4) {
+                    Text(stage.title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(themeTextPrimary)
+                    Text(stage.subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(themeTextSecondary)
+                }
+
+                HStack(spacing: 8) {
+                    processingStepChip(title: "RAW", isActive: stage.progressStep >= 1, accent: stage.accentColor)
+                    processingStepChip(title: "Style", isActive: stage.progressStep >= 2, accent: stage.accentColor)
+                    processingStepChip(title: "Save", isActive: stage.progressStep >= 3, accent: stage.accentColor)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 22)
+            .frame(maxWidth: 320)
+            .background(
+                LinearGradient(
+                    colors: [
+                        themeBackgroundTop.opacity(0.95),
+                        themeBackgroundBottom.opacity(0.95),
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [themeTeal.opacity(0.55), themePink.opacity(0.45)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: .black.opacity(0.45), radius: 24, x: 0, y: 18)
+            .padding(.horizontal, 24)
+        }
+        .allowsHitTesting(true)
+    }
+
+    private func processingStepChip(title: String, isActive: Bool, accent: Color) -> some View {
+        Text(title)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(isActive ? themeTextPrimary : themeTextSecondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(isActive ? accent.opacity(0.25) : themeBackgroundTop.opacity(0.45), in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(isActive ? accent.opacity(0.9) : themePink.opacity(0.22), lineWidth: 1)
+            )
     }
 
     private var photoPermissionDenied: Bool {

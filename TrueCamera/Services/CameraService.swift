@@ -33,15 +33,103 @@ nonisolated enum CameraCaptureFormat: String, CaseIterable, Identifiable, Sendab
     }
 }
 
+nonisolated enum StyledHEIFBitDepth: String, CaseIterable, Identifiable, Sendable {
+    case tenBit = "10bit"
+    case eightBit = "8bit"
+
+    var id: String { rawValue }
+
+    var shortLabel: String {
+        switch self {
+        case .tenBit: return "10-bit"
+        case .eightBit: return "8-bit"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .tenBit: return "10-bit (Max Quality)"
+        case .eightBit: return "8-bit (Faster)"
+        }
+    }
+}
+
+nonisolated enum StyledProcessingSource: String, CaseIterable, Identifiable, Sendable {
+    case proRAW = "proraw"
+    case processed = "processed"
+
+    var id: String { rawValue }
+
+    var shortLabel: String {
+        switch self {
+        case .proRAW: return "ProRAW"
+        case .processed: return "Processed"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .proRAW: return "ProRAW (Max Quality)"
+        case .processed: return "Processed (Faster)"
+        }
+    }
+}
+
+nonisolated enum PhotoCapturePriority: String, CaseIterable, Identifiable, Sendable {
+    case balanced = "balanced"
+    case quality = "quality"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .balanced: return "Balanced"
+        case .quality: return "Quality"
+        }
+    }
+
+    var photoQualityPrioritization: AVCapturePhotoOutput.QualityPrioritization {
+        switch self {
+        case .balanced: return .balanced
+        case .quality: return .quality
+        }
+    }
+}
+
+nonisolated enum PhotoResolutionCap: String, CaseIterable, Identifiable, Sendable {
+    case full = "full"
+    case mp12 = "12mp"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .full: return "Full"
+        case .mp12: return "12 MP"
+        }
+    }
+
+    var targetPixelCount: Int64? {
+        switch self {
+        case .full: return nil
+        case .mp12: return 12_000_000
+        }
+    }
+}
+
 final class CameraService: NSObject, ObservableObject {
     private enum PreferenceKey {
         static let hapticsEnabled = "camera.hapticsEnabled"
         static let shutterSoundEnabled = "camera.shutterSoundEnabled"
         static let captureFormat = "camera.captureFormat"
+        static let capturePriority = "camera.capturePriority"
+        static let resolutionCap = "camera.resolutionCap"
+        static let styledHEIFBitDepth = "camera.styledHEIFBitDepth"
+        static let styledProcessingSource = "camera.styledProcessingSource"
         static let saveRAWToLibrary = "camera.saveRAWToLibrary"
         static let selectedEffectPresetID = "camera.selectedEffectPresetID"
-        static let effectSettingsBlob = "camera.effect.settingsBlob.v2"
-        static let effectPresetsBlob = "camera.effect.userPresetsBlob.v1"
+        static let effectSettingsBlob = "camera.effect.settingsBlob.v3"
+        static let effectPresetsBlob = "camera.effect.userPresetsBlob.v2"
     }
 
     @Published private(set) var authorizationStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
@@ -74,6 +162,21 @@ final class CameraService: NSObject, ObservableObject {
             refreshCaptureConfigurationForCurrentFormat()
         }
     }
+    @Published var capturePriority: PhotoCapturePriority {
+        didSet { UserDefaults.standard.set(capturePriority.rawValue, forKey: PreferenceKey.capturePriority) }
+    }
+    @Published var resolutionCap: PhotoResolutionCap {
+        didSet {
+            UserDefaults.standard.set(resolutionCap.rawValue, forKey: PreferenceKey.resolutionCap)
+            sessionQueue.async { [weak self] in self?.updateMaxPhotoDimensions() }
+        }
+    }
+    @Published var styledHEIFBitDepth: StyledHEIFBitDepth {
+        didSet { UserDefaults.standard.set(styledHEIFBitDepth.rawValue, forKey: PreferenceKey.styledHEIFBitDepth) }
+    }
+    @Published var styledProcessingSource: StyledProcessingSource {
+        didSet { UserDefaults.standard.set(styledProcessingSource.rawValue, forKey: PreferenceKey.styledProcessingSource) }
+    }
     @Published var saveRAWToLibrary: Bool {
         didSet { UserDefaults.standard.set(saveRAWToLibrary, forKey: PreferenceKey.saveRAWToLibrary) }
     }
@@ -95,7 +198,8 @@ final class CameraService: NSObject, ObservableObject {
                 effectSettings = normalized
                 return
             }
-            persistEffectSettings(normalized)
+            schedulePersistEffectSettings(normalized)
+            schedulePrewarmExportPipeline(for: normalized)
             let snapshot = normalized
             previewStateQueue.async { [weak self] in
                 self?.previewEffectSettings = snapshot
@@ -109,6 +213,7 @@ final class CameraService: NSObject, ObservableObject {
     private let photoOutput = AVCapturePhotoOutput()
     nonisolated(unsafe) private let videoDataOutput = AVCaptureVideoDataOutput()
     private let effectsProcessor = PhotoEffectsProcessor()
+    private let exportEffectsProcessor = PhotoEffectsProcessor()
     private var currentInput: AVCaptureDeviceInput?
     private var isConfigured = false
     private var captureRotationCoordinator: AVCaptureDevice.RotationCoordinator?
@@ -123,6 +228,9 @@ final class CameraService: NSObject, ObservableObject {
     private let sessionQueue = DispatchQueue(label: "com.movieshot.session")
     private let previewOutputQueue = DispatchQueue(label: "com.movieshot.preview.output")
     private let previewStateQueue = DispatchQueue(label: "com.movieshot.preview.state")
+    private let persistenceQueue = DispatchQueue(label: "com.movieshot.persistence", qos: .utility)
+    private let prewarmQueue = DispatchQueue(label: "com.movieshot.export.prewarm", qos: .utility)
+    private let exportQueue = DispatchQueue(label: "com.movieshot.export", qos: .userInitiated)
     private let shutterHapticGenerator = UIImpactFeedbackGenerator(style: .medium)
     private let tapToContinuousFocusDelay: TimeInterval = 0.75
     private let longPressFocusLockDelay: TimeInterval = 0.25
@@ -134,6 +242,8 @@ final class CameraService: NSObject, ObservableObject {
     nonisolated(unsafe) private var previewRenderingEnabled = true
     nonisolated(unsafe) private var previewOverlayActive = false
     nonisolated(unsafe) private var lastPreviewRenderTime: CFTimeInterval = 0
+    private var persistEffectSettingsWorkItem: DispatchWorkItem?
+    private var prewarmExportWorkItem: DispatchWorkItem?
 
     var activeCaptureBadgeText: String? {
         appleProRAWActive ? "ProRAW" : nil
@@ -168,6 +278,14 @@ final class CameraService: NSObject, ObservableObject {
         self.shutterSoundEnabled = UserDefaults.standard.object(forKey: PreferenceKey.shutterSoundEnabled) as? Bool ?? true
         let storedCaptureFormatRaw = UserDefaults.standard.string(forKey: PreferenceKey.captureFormat)
         self.captureFormat = CameraCaptureFormat(rawValue: storedCaptureFormatRaw ?? "") ?? .appleProRAW
+        let storedCapturePriorityRaw = UserDefaults.standard.string(forKey: PreferenceKey.capturePriority)
+        self.capturePriority = PhotoCapturePriority(rawValue: storedCapturePriorityRaw ?? "") ?? .quality
+        let storedResolutionCapRaw = UserDefaults.standard.string(forKey: PreferenceKey.resolutionCap)
+        self.resolutionCap = PhotoResolutionCap(rawValue: storedResolutionCapRaw ?? "") ?? .full
+        let storedBitDepthRaw = UserDefaults.standard.string(forKey: PreferenceKey.styledHEIFBitDepth)
+        self.styledHEIFBitDepth = StyledHEIFBitDepth(rawValue: storedBitDepthRaw ?? "") ?? .tenBit
+        let storedProcessingSourceRaw = UserDefaults.standard.string(forKey: PreferenceKey.styledProcessingSource)
+        self.styledProcessingSource = StyledProcessingSource(rawValue: storedProcessingSourceRaw ?? "") ?? .proRAW
         self.saveRAWToLibrary = UserDefaults.standard.object(forKey: PreferenceKey.saveRAWToLibrary) as? Bool ?? false
         let loadedPresets = Self.loadStoredEffectPresets()
         self.effectPresets = loadedPresets
@@ -193,6 +311,8 @@ final class CameraService: NSObject, ObservableObject {
 
     func capturePhoto() {
         guard isSessionRunning else { return }
+        prewarmExportWorkItem?.cancel()
+        prewarmExportWorkItem = nil
         if hapticsEnabled {
             DispatchQueue.main.async { [weak self] in
                 self?.shutterHapticGenerator.impactOccurred(intensity: 0.9)
@@ -235,7 +355,7 @@ final class CameraService: NSObject, ObservableObject {
             self.session.beginConfiguration()
             if self.session.canAddOutput(self.photoOutput) {
                 self.session.addOutput(self.photoOutput)
-                self.photoOutput.maxPhotoQualityPrioritization = .balanced
+                self.photoOutput.maxPhotoQualityPrioritization = .quality
             }
             if self.session.canAddOutput(self.videoDataOutput) {
                 self.session.addOutput(self.videoDataOutput)
@@ -298,7 +418,6 @@ final class CameraService: NSObject, ObservableObject {
     func updateEffectSetting(_ update: (inout PhotoEffectSettings) -> Void) {
         var next = effectSettings
         update(&next)
-        selectedEffectPresetID = PhotoEffectLibrary.customPresetID
         effectSettings = next.clamped()
     }
 
@@ -306,22 +425,28 @@ final class CameraService: NSObject, ObservableObject {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        var nextPresets = effectPresets
-        if let index = nextPresets.firstIndex(where: { $0.name.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }) {
-            nextPresets[index].settings = effectSettings.clamped()
-            effectPresets = nextPresets
-            selectedEffectPresetID = nextPresets[index].id
-            return
+        let existingNames = Set(effectPresets.map { $0.name.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) })
+        var resolvedName = trimmed
+        var suffix = 2
+        while existingNames.contains(resolvedName.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)) {
+            resolvedName = "\(trimmed) \(suffix)"
+            suffix += 1
         }
 
         let preset = PhotoEffectPreset(
             id: UUID().uuidString,
-            name: trimmed,
+            name: resolvedName,
             settings: effectSettings.clamped()
         )
-        nextPresets.append(preset)
-        effectPresets = nextPresets
+        effectPresets.append(preset)
         selectedEffectPresetID = preset.id
+    }
+
+    func updateSelectedPresetFromCurrentSettings() {
+        guard let selectedIndex = effectPresets.firstIndex(where: { $0.id == selectedEffectPresetID }) else { return }
+        var nextPresets = effectPresets
+        nextPresets[selectedIndex].settings = effectSettings.clamped()
+        effectPresets = nextPresets
     }
 
     func deleteEffectPreset(_ preset: PhotoEffectPreset) {
@@ -345,12 +470,30 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
 
-    func buildStyledPhotoData(from rawData: Data?) async -> Data? {
-        guard let rawData else { return nil }
+    func buildStyledPhotoData(
+        rawData: Data?,
+        processedData: Data?
+    ) async -> (data: Data, uniformTypeIdentifier: String)? {
+        guard rawData != nil || processedData != nil else { return nil }
         let settings = effectSettingsSnapshot()
-        return await Task.detached(priority: .userInitiated) {
-            PhotoEffectsProcessor().renderProcessedJPEG(from: rawData, settings: settings)
-        }.value
+        let exportBitDepth = styledHEIFBitDepth
+        let processingSource = styledProcessingSource
+        return await withCheckedContinuation { continuation in
+            exportQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let rendered = self.exportEffectsProcessor.renderProcessedImageData(
+                    rawData: rawData,
+                    processedData: processedData,
+                    settings: settings,
+                    preferredHEIFBitDepth: exportBitDepth,
+                    preferredProcessingSource: processingSource
+                )
+                continuation.resume(returning: rendered)
+            }
+        }
     }
 
     private func defaultLens(from lenses: [CameraLens]) -> CameraLens? {
@@ -614,24 +757,21 @@ final class CameraService: NSObject, ObservableObject {
             DispatchQueue.main.async { self.onPhotoCapture?(CameraCaptureResult(rawData: nil, processedData: nil)) }
             return
         }
-        settings.photoQualityPrioritization = .speed
+        settings.photoQualityPrioritization = capturePriority.photoQualityPrioritization
         if #available(iOS 18.0, *), photoOutput.isShutterSoundSuppressionSupported {
             settings.isShutterSoundSuppressionEnabled = !shutterSoundEnabled
         }
         if let connection = photoOutput.connection(with: .video), connection.isVideoMirroringSupported {
             connection.isVideoMirrored = currentPosition == .front
         }
-        // Always capture at the maximum resolution the active format supports.
-        // Query the device directly at capture time so we never rely on a stale cached value.
+        // Keep dimensions predictable and avoid forcing the heaviest RAW mode by default.
         if let device = currentInput?.device {
-            let supported = device.activeFormat.supportedMaxPhotoDimensions
-            if let maxDims = supported.max(by: { $0.width * $0.height < $1.width * $1.height }),
-               maxDims.width > 0 {
-                if photoOutput.maxPhotoDimensions.width != maxDims.width ||
-                   photoOutput.maxPhotoDimensions.height != maxDims.height {
-                    photoOutput.maxPhotoDimensions = maxDims
+            if let preferredDimensions = preferredPhotoDimensions(for: device) {
+                if photoOutput.maxPhotoDimensions.width != preferredDimensions.width ||
+                   photoOutput.maxPhotoDimensions.height != preferredDimensions.height {
+                    photoOutput.maxPhotoDimensions = preferredDimensions
                 }
-                settings.maxPhotoDimensions = maxDims
+                settings.maxPhotoDimensions = preferredDimensions
             }
         }
         let captureID = settings.uniqueID
@@ -656,25 +796,20 @@ final class CameraService: NSObject, ObservableObject {
         return photoOutput.availableRawPhotoPixelFormatTypes.first(where: AVCapturePhotoOutput.isAppleProRAWPixelFormat)
     }
 
-    private func preferredProcessedFormatForCapture() -> [String: Any]? {
-        let codecs = photoOutput.availablePhotoCodecTypes
-        if codecs.contains(.hevc) {
-            return [AVVideoCodecKey: AVVideoCodecType.hevc]
-        }
-        if codecs.contains(.jpeg) {
-            return [AVVideoCodecKey: AVVideoCodecType.jpeg]
-        }
-        return nil
+    private func preferredProcessedCodec() -> AVVideoCodecType {
+        photoOutput.availablePhotoCodecTypes.contains(.hevc) ? .hevc : .jpeg
     }
 
     private func makePhotoSettings() -> AVCapturePhotoSettings? {
-        let processedFormat = preferredProcessedFormatForCapture()
         guard let rawPixelType = preferredAppleProRAWPixelFormatForCapture() else { return nil }
+        let processedFormat: [String: Any] = [AVVideoCodecKey: preferredProcessedCodec()]
         return AVCapturePhotoSettings(rawPixelFormatType: rawPixelType, processedFormat: processedFormat)
     }
 
     nonisolated private func shouldSkipProcessedPreview(for settings: PhotoEffectSettings) -> Bool {
         abs(settings.baseExposure) < 0.0001 &&
+            abs(settings.highlights) < 0.0001 &&
+            abs(settings.shadows) < 0.0001 &&
             abs(settings.contrast) < 0.0001 &&
             abs(settings.saturation) < 0.0001 &&
             abs(settings.vibrance) < 0.0001 &&
@@ -702,13 +837,41 @@ final class CameraService: NSObject, ObservableObject {
 
     private func updateMaxPhotoDimensions() {
         guard let device = currentInput?.device else { return }
-        let supported = device.activeFormat.supportedMaxPhotoDimensions
-        guard !supported.isEmpty else { return }
-        guard let dimensions = supported.max(by: { $0.width * $0.height < $1.width * $1.height }) else { return }
+        guard let dimensions = preferredPhotoDimensions(for: device) else { return }
         let current = photoOutput.maxPhotoDimensions
         if current.width != dimensions.width || current.height != dimensions.height {
             photoOutput.maxPhotoDimensions = dimensions
         }
+    }
+
+    private func preferredPhotoDimensions(for device: AVCaptureDevice) -> CMVideoDimensions? {
+        let supported = device.activeFormat.supportedMaxPhotoDimensions
+        let valid = supported.filter { $0.width > 0 && $0.height > 0 }
+        guard !valid.isEmpty else { return nil }
+        func pixelCount(_ dimensions: CMVideoDimensions) -> Int64 {
+            Int64(dimensions.width) * Int64(dimensions.height)
+        }
+        let sorted = valid.sorted { lhs, rhs in
+            let lhsPixels = pixelCount(lhs)
+            let rhsPixels = pixelCount(rhs)
+            return lhsPixels < rhsPixels
+        }
+        guard let targetPixels = resolutionCap.targetPixelCount else {
+            return sorted.last
+        }
+        let candidates = sorted.filter {
+            let pixels = pixelCount($0)
+            return pixels >= 10_000_000 && pixels <= 15_000_000
+        }
+        if let nearestInRange = candidates.min(by: {
+            abs(pixelCount($0) - targetPixels) < abs(pixelCount($1) - targetPixels)
+        }) {
+            return nearestInRange
+        }
+
+        return sorted.min(by: {
+            abs(pixelCount($0) - targetPixels) < abs(pixelCount($1) - targetPixels)
+        }) ?? sorted.last
     }
 
     private func lensInfo(for type: AVCaptureDevice.DeviceType, position: AVCaptureDevice.Position) -> (name: String, sortOrder: Int) {
@@ -764,6 +927,28 @@ final class CameraService: NSObject, ObservableObject {
             let preferredLens = self.bestLensAfterFormatChange(from: self.selectedLens, availableLenses: lenses)
             self.configureInput(for: preferredLens)
         }
+    }
+
+    private func schedulePersistEffectSettings(_ settings: PhotoEffectSettings) {
+        persistEffectSettingsWorkItem?.cancel()
+        let snapshot = settings.clamped()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.persistEffectSettings(snapshot)
+        }
+        persistEffectSettingsWorkItem = workItem
+        persistenceQueue.asyncAfter(deadline: .now() + 0.22, execute: workItem)
+    }
+
+    private func schedulePrewarmExportPipeline(for settings: PhotoEffectSettings) {
+        prewarmExportWorkItem?.cancel()
+        let snapshot = settings.clamped()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.prewarmQueue.async { [weak self] in
+                self?.exportEffectsProcessor.prewarmExportPipeline(for: snapshot)
+            }
+        }
+        prewarmExportWorkItem = workItem
+        persistenceQueue.asyncAfter(deadline: .now() + 0.12, execute: workItem)
     }
 
     private func persistEffectSettings(_ settings: PhotoEffectSettings) {

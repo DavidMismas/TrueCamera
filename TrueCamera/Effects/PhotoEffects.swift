@@ -87,6 +87,8 @@ nonisolated struct ColorGradingSettings: Equatable, Hashable, Codable, Sendable 
 
 nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     var baseExposure: Double
+    var highlights: Double
+    var shadows: Double
     /// Contrast percentage offset where 0 = neutral (actual contrast = 1 + contrast / 100).
     var contrast: Double
     /// Saturation offset where 0 = neutral (actual saturation = 1 + saturation).
@@ -106,6 +108,8 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
 
     static let neutral = PhotoEffectSettings(
         baseExposure: 0,
+        highlights: 0,
+        shadows: 0,
         contrast: 0,
         saturation: 0,
         vibrance: 0,
@@ -123,6 +127,8 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     )
 
     static let baseExposureRange: ClosedRange<Double> = -2.0...2.0
+    static let highlightsRange: ClosedRange<Double> = -1.0...1.0
+    static let shadowsRange: ClosedRange<Double> = -1.0...1.0
     static let contrastRange: ClosedRange<Double> = -20...20
     static let saturationRange: ClosedRange<Double> = -0.7...0.7
     static let vibranceRange: ClosedRange<Double> = -0.5...0.5
@@ -164,6 +170,8 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
 
         var result = self
         result.baseExposure = clamp(result.baseExposure, to: Self.baseExposureRange)
+        result.highlights = clamp(result.highlights, to: Self.highlightsRange)
+        result.shadows = clamp(result.shadows, to: Self.shadowsRange)
         result.contrast = clamp(result.contrast, to: Self.contrastRange)
         result.saturation = clamp(result.saturation, to: Self.saturationRange)
         result.vibrance = clamp(result.vibrance, to: Self.vibranceRange)
@@ -190,6 +198,72 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
         result.colorGrading.shadows = clampedTone(result.colorGrading.shadows)
         result.colorGrading.highlights = clampedTone(result.colorGrading.highlights)
         return result
+    }
+}
+
+extension PhotoEffectSettings {
+    private enum CodingKeys: String, CodingKey {
+        case baseExposure
+        case highlights
+        case shadows
+        case contrast
+        case saturation
+        case vibrance
+        case warmth
+        case tint
+        case clarity
+        case sharpness
+        case bloomIntensity
+        case bloomRadius
+        case vignetteIntensity
+        case vignetteRadius
+        case grainAmount
+        case hsl
+        case colorGrading
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = Self.neutral
+
+        baseExposure = try container.decodeIfPresent(Double.self, forKey: .baseExposure) ?? defaults.baseExposure
+        highlights = try container.decodeIfPresent(Double.self, forKey: .highlights) ?? defaults.highlights
+        shadows = try container.decodeIfPresent(Double.self, forKey: .shadows) ?? defaults.shadows
+        contrast = try container.decodeIfPresent(Double.self, forKey: .contrast) ?? defaults.contrast
+        saturation = try container.decodeIfPresent(Double.self, forKey: .saturation) ?? defaults.saturation
+        vibrance = try container.decodeIfPresent(Double.self, forKey: .vibrance) ?? defaults.vibrance
+        warmth = try container.decodeIfPresent(Double.self, forKey: .warmth) ?? defaults.warmth
+        tint = try container.decodeIfPresent(Double.self, forKey: .tint) ?? defaults.tint
+        clarity = try container.decodeIfPresent(Double.self, forKey: .clarity) ?? defaults.clarity
+        sharpness = try container.decodeIfPresent(Double.self, forKey: .sharpness) ?? defaults.sharpness
+        bloomIntensity = try container.decodeIfPresent(Double.self, forKey: .bloomIntensity) ?? defaults.bloomIntensity
+        bloomRadius = try container.decodeIfPresent(Double.self, forKey: .bloomRadius) ?? defaults.bloomRadius
+        vignetteIntensity = try container.decodeIfPresent(Double.self, forKey: .vignetteIntensity) ?? defaults.vignetteIntensity
+        vignetteRadius = try container.decodeIfPresent(Double.self, forKey: .vignetteRadius) ?? defaults.vignetteRadius
+        grainAmount = try container.decodeIfPresent(Double.self, forKey: .grainAmount) ?? defaults.grainAmount
+        hsl = try container.decodeIfPresent(HSLAdjustments.self, forKey: .hsl) ?? defaults.hsl
+        colorGrading = try container.decodeIfPresent(ColorGradingSettings.self, forKey: .colorGrading) ?? defaults.colorGrading
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(baseExposure, forKey: .baseExposure)
+        try container.encode(highlights, forKey: .highlights)
+        try container.encode(shadows, forKey: .shadows)
+        try container.encode(contrast, forKey: .contrast)
+        try container.encode(saturation, forKey: .saturation)
+        try container.encode(vibrance, forKey: .vibrance)
+        try container.encode(warmth, forKey: .warmth)
+        try container.encode(tint, forKey: .tint)
+        try container.encode(clarity, forKey: .clarity)
+        try container.encode(sharpness, forKey: .sharpness)
+        try container.encode(bloomIntensity, forKey: .bloomIntensity)
+        try container.encode(bloomRadius, forKey: .bloomRadius)
+        try container.encode(vignetteIntensity, forKey: .vignetteIntensity)
+        try container.encode(vignetteRadius, forKey: .vignetteRadius)
+        try container.encode(grainAmount, forKey: .grainAmount)
+        try container.encode(hsl, forKey: .hsl)
+        try container.encode(colorGrading, forKey: .colorGrading)
     }
 }
 

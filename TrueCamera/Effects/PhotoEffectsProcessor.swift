@@ -10,15 +10,26 @@ nonisolated private struct ColorCubeKey: Hashable {
     let cubeDimension: Int
 }
 
+nonisolated private struct SendableFloatPointer: @unchecked Sendable {
+    let pointer: UnsafeMutablePointer<Float>
+}
+
 final class PhotoEffectsProcessor {
-    private let context: CIContext
-    private let previewCubeDimension = 12
-    private let exportCubeDimension = 32
+    private let previewContext: CIContext
+    private let exportContext: CIContext
+    private let exportColorSpace: CGColorSpace
+    private let previewCubeDimension = 14
+    private let exportCubeDimension = 80
     private let cubeCacheLock = NSLock()
     nonisolated(unsafe) private var colorCubeCache: [ColorCubeKey: Data] = [:]
 
-    nonisolated init(context: CIContext = CIContext(options: [.cacheIntermediates: false])) {
-        self.context = context
+    nonisolated init(
+        previewContext: CIContext = CIContext(options: [.cacheIntermediates: false]),
+        exportContext: CIContext = PhotoEffectsProcessor.makeHighPrecisionExportContext()
+    ) {
+        self.previewContext = previewContext
+        self.exportContext = exportContext
+        self.exportColorSpace = PhotoEffectsProcessor.makeExportColorSpace()
     }
 
     nonisolated func renderPreviewImage(
@@ -47,27 +58,126 @@ final class PhotoEffectsProcessor {
             outputImage = graded
         }
 
-        guard let cgImage = context.createCGImage(outputImage, from: outputImage.extent.integral) else {
+        guard let cgImage = previewContext.createCGImage(outputImage, from: outputImage.extent.integral) else {
             return nil
         }
         return UIImage(cgImage: cgImage)
     }
 
-    nonisolated func renderProcessedJPEG(from imageData: Data, settings: PhotoEffectSettings) -> Data? {
-        guard let input = CIImage(data: imageData, options: [.applyOrientationProperty: true]) else { return nil }
-        // Grain intentionally excluded from final JPEG export.
+    nonisolated func renderProcessedImageData(
+        rawData: Data?,
+        processedData: Data?,
+        settings: PhotoEffectSettings,
+        preferredHEIFBitDepth: StyledHEIFBitDepth = .tenBit,
+        preferredProcessingSource: StyledProcessingSource = .proRAW
+    ) -> (data: Data, uniformTypeIdentifier: String)? {
+        if shouldBypassNeutralProcessing(settings),
+           let processedData,
+           let passthroughUTI = detectedPassthroughUTI(for: processedData) {
+            return (data: processedData, uniformTypeIdentifier: passthroughUTI)
+        }
+
+        guard let input = makeExportInputImage(
+            rawData: rawData,
+            processedData: processedData,
+            preferredProcessingSource: preferredProcessingSource
+        ) else { return nil }
+        // Grain intentionally excluded from final styled export.
         let graded = apply(
             to: input,
             settings: settings,
             includeGrain: false,
             cubeDimension: exportCubeDimension
         )
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        return context.jpegRepresentation(
-            of: graded,
-            colorSpace: colorSpace,
-            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.95]
-        )
+        let options: [CIImageRepresentationOption: Any] = [
+            kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 1.0,
+            kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true,
+        ]
+        if preferredHEIFBitDepth == .tenBit,
+           #available(iOS 15.0, *),
+           let heif10 = try? exportContext.heif10Representation(of: graded, colorSpace: exportColorSpace, options: options) {
+            return (data: heif10, uniformTypeIdentifier: "public.heic")
+        }
+        if let heif = exportContext.heifRepresentation(of: graded, format: .RGBA8, colorSpace: exportColorSpace, options: options) {
+            return (data: heif, uniformTypeIdentifier: "public.heic")
+        }
+        guard let jpeg = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: options) else {
+            return nil
+        }
+        return (data: jpeg, uniformTypeIdentifier: "public.jpeg")
+    }
+
+    nonisolated private func detectedPassthroughUTI(for data: Data) -> String? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source) as String? else { return nil }
+        if type == "public.heic" || type.contains("heic") {
+            return "public.heic"
+        }
+        if type == "public.jpeg" || type.contains("jpeg") {
+            return "public.jpeg"
+        }
+        return nil
+    }
+
+    nonisolated private func shouldBypassNeutralProcessing(_ settings: PhotoEffectSettings) -> Bool {
+        abs(settings.baseExposure) < 0.0001 &&
+            abs(settings.highlights) < 0.0001 &&
+            abs(settings.shadows) < 0.0001 &&
+            abs(settings.contrast) < 0.0001 &&
+            abs(settings.saturation) < 0.0001 &&
+            abs(settings.vibrance) < 0.0001 &&
+            abs(settings.warmth) < 0.5 &&
+            abs(settings.tint) < 0.5 &&
+            abs(settings.clarity) < 0.0001 &&
+            abs(settings.sharpness) < 0.0001 &&
+            settings.bloomIntensity < 0.0001 &&
+            settings.vignetteIntensity < 0.0001 &&
+            settings.grainAmount < 0.0001 &&
+            settings.hsl == .neutral &&
+            settings.colorGrading == .neutral
+    }
+
+    /// Precomputes expensive LUT resources for the current export settings.
+    /// Keeps final quality identical while reducing shutter-to-save latency.
+    nonisolated func prewarmExportPipeline(for settings: PhotoEffectSettings) {
+        guard shouldApplyColorCube(for: settings) else { return }
+        _ = colorCubeData(for: settings, cubeDimension: exportCubeDimension)
+    }
+
+    nonisolated private func makeExportInputImage(
+        rawData: Data?,
+        processedData: Data?,
+        preferredProcessingSource: StyledProcessingSource
+    ) -> CIImage? {
+        switch preferredProcessingSource {
+        case .proRAW:
+            if let rawData, let rawImage = decodeRawImage(from: rawData) {
+                return rawImage
+            }
+            if let processedData, let processedImage = CIImage(data: processedData, options: [.applyOrientationProperty: true]) {
+                return processedImage
+            }
+            return nil
+        case .processed:
+            if let processedData, let processedImage = CIImage(data: processedData, options: [.applyOrientationProperty: true]) {
+                return processedImage
+            }
+            if let rawData, let rawImage = decodeRawImage(from: rawData) {
+                return rawImage
+            }
+            return nil
+        }
+    }
+
+    nonisolated private func decodeRawImage(from rawData: Data) -> CIImage? {
+        if let rawFilter = CIFilter(
+            imageData: rawData,
+            options: [CIRAWFilterOption.allowDraftMode: false]
+        ) as? CIRAWFilter,
+           let output = configureRAWDevelopmentAndRender(rawFilter: rawFilter) {
+            return output
+        }
+        return CIImage(data: rawData, options: [.applyOrientationProperty: true])
     }
 
     nonisolated func renderReferencePreview(
@@ -98,8 +208,48 @@ final class PhotoEffectsProcessor {
             ? graded.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             : graded
 
-        guard let cgImage = context.createCGImage(output, from: output.extent.integral) else { return nil }
+        guard let cgImage = previewContext.createCGImage(output, from: output.extent.integral) else { return nil }
         return UIImage(cgImage: cgImage)
+    }
+
+    nonisolated private static func makeExportColorSpace() -> CGColorSpace {
+        CGColorSpace(name: CGColorSpace.displayP3) ??
+            CGColorSpace(name: CGColorSpace.sRGB) ??
+            CGColorSpaceCreateDeviceRGB()
+    }
+
+    nonisolated private static func makeHighPrecisionExportContext() -> CIContext {
+        var options: [CIContextOption: Any] = [
+            .cacheIntermediates: true,
+            .workingFormat: CIFormat.RGBAh.rawValue,
+        ]
+        if let linearP3 = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) {
+            options[.workingColorSpace] = linearP3
+        } else if let linearSRGB = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) {
+            options[.workingColorSpace] = linearSRGB
+        }
+        return CIContext(options: options)
+    }
+
+    nonisolated private func configureRAWDevelopmentAndRender(rawFilter: CIRAWFilter) -> CIImage? {
+        // Keep RAW development predictable: no draft decode and no aggressive local tone mapping.
+        rawFilter.isDraftModeEnabled = false
+        rawFilter.scaleFactor = 1
+        rawFilter.exposure = 0
+        // Lower global RAW tone-curve to preserve headroom in bright/dark extremes.
+        rawFilter.boostAmount = min(rawFilter.boostAmount, 0.35)
+        rawFilter.boostShadowAmount = min(rawFilter.boostShadowAmount, 0.95)
+        rawFilter.isGamutMappingEnabled = true
+        rawFilter.extendedDynamicRangeAmount = 0
+
+        if #available(iOS 16.0, *), rawFilter.isHighlightRecoverySupported {
+            rawFilter.isHighlightRecoveryEnabled = true
+        }
+        if rawFilter.isLocalToneMapSupported {
+            rawFilter.localToneMapAmount = 0
+        }
+
+        return rawFilter.outputImage
     }
 
     nonisolated private func apply(
@@ -115,6 +265,17 @@ final class PhotoEffectsProcessor {
             exposure.inputImage = output
             exposure.ev = Float(settings.baseExposure)
             if let processed = exposure.outputImage {
+                output = processed
+            }
+        }
+
+        if abs(settings.highlights) > 0.0001 || abs(settings.shadows) > 0.0001 {
+            let tonal = CIFilter.highlightShadowAdjust()
+            tonal.inputImage = output
+            // Neutral is highlightAmount = 1 and shadowAmount = 0.
+            tonal.highlightAmount = Float(max(0.25, min(1.75, 1 + (settings.highlights * 0.72))))
+            tonal.shadowAmount = Float(max(-0.85, min(0.85, settings.shadows * 0.82)))
+            if let processed = tonal.outputImage {
                 output = processed
             }
         }
@@ -150,7 +311,11 @@ final class PhotoEffectsProcessor {
         }
 
         if shouldApplyColorCube(for: settings) {
+            let sourceTone = output
             output = applyHSLAndColorGrading(settings, to: output, cubeDimension: cubeDimension)
+            if shouldPreserveSourceLuminanceAfterGrading(settings) {
+                output = preserveSourceLuminance(from: sourceTone, to: output)
+            }
         }
 
         if abs(settings.clarity) > 0.0001 {
@@ -159,6 +324,10 @@ final class PhotoEffectsProcessor {
 
         if abs(settings.sharpness) > 0.0001 {
             output = applySharpness(settings.sharpness, to: output)
+        }
+
+        if shouldApplyExtremeToneProtection(for: settings) {
+            output = applyExtremeToneProtection(to: output)
         }
 
         if settings.bloomIntensity > 0.0001 {
@@ -186,6 +355,46 @@ final class PhotoEffectsProcessor {
         }
 
         return output.cropped(to: image.extent)
+    }
+
+    nonisolated private func shouldApplyExtremeToneProtection(for settings: PhotoEffectSettings) -> Bool {
+        abs(settings.baseExposure) > 0.0001 ||
+            abs(settings.highlights) > 0.0001 ||
+            abs(settings.shadows) > 0.0001 ||
+            abs(settings.contrast) > 0.0001 ||
+            abs(settings.saturation) > 0.0001 ||
+            abs(settings.vibrance) > 0.0001 ||
+            abs(settings.warmth) > 0.5 ||
+            abs(settings.tint) > 0.5 ||
+            abs(settings.clarity) > 0.0001 ||
+            abs(settings.sharpness) > 0.0001 ||
+            settings.bloomIntensity > 0.0001 ||
+            settings.vignetteIntensity > 0.0001 ||
+            settings.hsl != .neutral ||
+            settings.colorGrading != .neutral
+    }
+
+    nonisolated private func applyExtremeToneProtection(to image: CIImage) -> CIImage {
+        var output = image
+
+        if let toneCurve = CIFilter(name: "CIToneCurve") {
+            toneCurve.setValue(output, forKey: kCIInputImageKey)
+            // Soft toe + shoulder to avoid hard black/white clipping after grading.
+            toneCurve.setValue(CIVector(x: 0.00, y: 0.014), forKey: "inputPoint0")
+            toneCurve.setValue(CIVector(x: 0.12, y: 0.124), forKey: "inputPoint1")
+            toneCurve.setValue(CIVector(x: 0.50, y: 0.50), forKey: "inputPoint2")
+            toneCurve.setValue(CIVector(x: 0.88, y: 0.872), forKey: "inputPoint3")
+            toneCurve.setValue(CIVector(x: 1.00, y: 0.988), forKey: "inputPoint4")
+            if let curved = toneCurve.outputImage {
+                output = curved
+            }
+        }
+
+        let highlightShadow = CIFilter.highlightShadowAdjust()
+        highlightShadow.inputImage = output
+        highlightShadow.shadowAmount = 0.03
+        highlightShadow.highlightAmount = 0.985
+        return highlightShadow.outputImage?.cropped(to: image.extent) ?? output
     }
 
     nonisolated private func shouldApplyColorCube(for settings: PhotoEffectSettings) -> Bool {
@@ -235,38 +444,45 @@ final class PhotoEffectsProcessor {
         }
         cubeCacheLock.unlock()
 
-        var cube = [Float](repeating: 0, count: cubeDimension * cubeDimension * cubeDimension * 4)
-        var offset = 0
+        let totalEntries = cubeDimension * cubeDimension * cubeDimension
+        var cube = [Float](repeating: 0, count: totalEntries * 4)
+        cube.withUnsafeMutableBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            let sendableBase = SendableFloatPointer(pointer: baseAddress)
 
-        for blue in 0 ..< cubeDimension {
-            if Task.isCancelled { return nil }
-            let b = Double(blue) / Double(cubeDimension - 1)
-            for green in 0 ..< cubeDimension {
+            DispatchQueue.concurrentPerform(iterations: totalEntries) { index in
+                let red = index % cubeDimension
+                let green = (index / cubeDimension) % cubeDimension
+                let blue = index / (cubeDimension * cubeDimension)
+
+                let r = Double(red) / Double(cubeDimension - 1)
                 let g = Double(green) / Double(cubeDimension - 1)
-                for red in 0 ..< cubeDimension {
-                    let r = Double(red) / Double(cubeDimension - 1)
-                    var color = SIMD3<Double>(r, g, b)
+                let b = Double(blue) / Double(cubeDimension - 1)
+                var color = SIMD3<Double>(r, g, b)
 
-                    color = applyHSLMix(to: color, hsl: settings.hsl)
-                    color = applyColorGrading(to: color, grading: settings.colorGrading)
+                color = applyHSLMix(to: color, hsl: settings.hsl)
+                color = applyColorGrading(to: color, grading: settings.colorGrading)
 
-                    cube[offset] = Float(clamp(color.x, 0, 1))
-                    cube[offset + 1] = Float(clamp(color.y, 0, 1))
-                    cube[offset + 2] = Float(clamp(color.z, 0, 1))
-                    cube[offset + 3] = 1
-                    offset += 4
-                }
+                let offset = index * 4
+                sendableBase.pointer[offset] = Float(clamp(color.x, 0, 1))
+                sendableBase.pointer[offset + 1] = Float(clamp(color.y, 0, 1))
+                sendableBase.pointer[offset + 2] = Float(clamp(color.z, 0, 1))
+                sendableBase.pointer[offset + 3] = 1
             }
         }
 
         let data = cube.withUnsafeBufferPointer { Data(buffer: $0) }
         cubeCacheLock.lock()
+        if colorCubeCache.count >= 6 {
+            colorCubeCache.removeAll(keepingCapacity: true)
+        }
         colorCubeCache[key] = data
         cubeCacheLock.unlock()
         return data
     }
 
     nonisolated private func applyHSLMix(to rgb: SIMD3<Double>, hsl: HSLAdjustments) -> SIMD3<Double> {
+        let original = rgb
         var (hue, saturation, lightness) = rgbToHsl(rgb)
 
         var hueShiftSum = 0.0
@@ -293,17 +509,36 @@ final class PhotoEffectsProcessor {
         hue = wrapHue(hue)
         saturation = clamp(saturation, 0, 1)
         lightness = clamp(lightness, 0, 1)
-        return hslToRgb(h: hue, s: saturation, l: lightness)
+        let adjusted = hslToRgb(h: hue, s: saturation, l: lightness)
+
+        // Hue in near-neutral pixels is unstable and creates blotchy walls/highlights.
+        let chromaWeight = smoothstep(0.10, 0.34, rgbSaturation(original))
+        let shadowGuard = smoothstep(0.04, 0.14, lightness)
+        let highlightGuard = 1 - smoothstep(0.90, 0.98, lightness)
+        let protection = chromaWeight * shadowGuard * highlightGuard
+        return mix(original, adjusted, t: protection)
     }
 
     nonisolated private func applyColorGrading(to rgb: SIMD3<Double>, grading: ColorGradingSettings) -> SIMD3<Double> {
         var output = rgb
-
-        if grading.global.amount > 0.0001 {
-            output = toneBand(output, toward: hueToneColor(grading.global.hue), t: grading.global.amount * 0.35)
-        }
+        let saturation = rgbSaturation(output)
+        // Avoid tint speckling and blotchy artifacts in near-neutral fog/sky regions.
+        let chromaWeight = smoothstep(0.06, 0.24, saturation)
+        guard chromaWeight > 0.0001 else { return output }
 
         let luminance = dot(output, SIMD3<Double>(0.2126, 0.7152, 0.0722))
+        let shadowGuard = smoothstep(0.04, 0.16, luminance)
+        let highlightGuard = 1 - smoothstep(0.90, 0.99, luminance)
+        let protectedWeight = chromaWeight * shadowGuard * highlightGuard
+
+        if grading.global.amount > 0.0001 {
+            output = toneBand(
+                output,
+                toward: hueToneColor(grading.global.hue),
+                t: grading.global.amount * 0.32 * protectedWeight
+            )
+        }
+
         let shadowWeight = 1 - smoothstep(0.12, 0.55, luminance)
         let highlightWeight = smoothstep(0.45, 0.88, luminance)
 
@@ -311,14 +546,14 @@ final class PhotoEffectsProcessor {
             output = toneBand(
                 output,
                 toward: hueToneColor(grading.shadows.hue),
-                t: grading.shadows.amount * shadowWeight * 0.7
+                t: grading.shadows.amount * shadowWeight * 0.62 * protectedWeight
             )
         }
         if grading.highlights.amount > 0.0001 {
             output = toneBand(
                 output,
                 toward: hueToneColor(grading.highlights.hue),
-                t: grading.highlights.amount * highlightWeight * 0.7
+                t: grading.highlights.amount * highlightWeight * 0.62 * protectedWeight
             )
         }
 
@@ -327,6 +562,20 @@ final class PhotoEffectsProcessor {
             clamp(output.y, 0, 1),
             clamp(output.z, 0, 1)
         )
+    }
+
+    nonisolated private func shouldPreserveSourceLuminanceAfterGrading(_ settings: PhotoEffectSettings) -> Bool {
+        guard settings.hsl == .neutral else { return false }
+        return settings.colorGrading.global.amount > 0.0001 ||
+            settings.colorGrading.shadows.amount > 0.0001 ||
+            settings.colorGrading.highlights.amount > 0.0001
+    }
+
+    nonisolated private func preserveSourceLuminance(from source: CIImage, to graded: CIImage) -> CIImage {
+        guard let colorBlend = CIFilter(name: "CIColorBlendMode") else { return graded }
+        colorBlend.setValue(graded, forKey: kCIInputImageKey)
+        colorBlend.setValue(source, forKey: kCIInputBackgroundImageKey)
+        return colorBlend.outputImage?.cropped(to: source.extent) ?? graded
     }
 
     nonisolated private func applyClarity(_ value: Double, to image: CIImage) -> CIImage {
@@ -390,6 +639,18 @@ final class PhotoEffectsProcessor {
     nonisolated private func hueToneColor(_ hue: Double) -> SIMD3<Double> {
         let wrapped = wrapHue(hue)
         return hslToRgb(h: wrapped, s: 1, l: 0.5)
+    }
+
+    nonisolated private func rgbSaturation(_ rgb: SIMD3<Double>) -> Double {
+        let maxV = max(rgb.x, max(rgb.y, rgb.z))
+        let minV = min(rgb.x, min(rgb.y, rgb.z))
+        guard maxV > 0 else { return 0 }
+        return (maxV - minV) / maxV
+    }
+
+    nonisolated private func mix(_ a: SIMD3<Double>, _ b: SIMD3<Double>, t: Double) -> SIMD3<Double> {
+        let clampedT = clamp(t, 0, 1)
+        return (a * (1 - clampedT)) + (b * clampedT)
     }
 
     nonisolated private func hueCenter(for band: HSLColorBand) -> Double {

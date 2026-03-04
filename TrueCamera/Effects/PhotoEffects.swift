@@ -103,6 +103,7 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     var vignetteIntensity: Double
     var vignetteRadius: Double
     var grainAmount: Double
+    var grainSize: Double
     var hsl: HSLAdjustments
     var colorGrading: ColorGradingSettings
 
@@ -122,6 +123,7 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
         vignetteIntensity: 0,
         vignetteRadius: 0,
         grainAmount: 0,
+        grainSize: 1.0,
         hsl: .neutral,
         colorGrading: .neutral
     )
@@ -141,6 +143,7 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     static let vignetteIntensityRange: ClosedRange<Double> = 0...2.0
     static let vignetteRadiusRange: ClosedRange<Double> = 0...2.0
     static let grainAmountRange: ClosedRange<Double> = 0...0.22
+    static let grainSizeRange: ClosedRange<Double> = 0.6...2.2
 
     static let hslHueRange: ClosedRange<Double> = -35...35
     static let hslSaturationRange: ClosedRange<Double> = -0.5...0.5
@@ -184,6 +187,7 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
         result.vignetteIntensity = clamp(result.vignetteIntensity, to: Self.vignetteIntensityRange)
         result.vignetteRadius = clamp(result.vignetteRadius, to: Self.vignetteRadiusRange)
         result.grainAmount = clamp(result.grainAmount, to: Self.grainAmountRange)
+        result.grainSize = clamp(result.grainSize, to: Self.grainSizeRange)
 
         result.hsl.red = clampedHSL(result.hsl.red)
         result.hsl.orange = clampedHSL(result.hsl.orange)
@@ -218,6 +222,7 @@ extension PhotoEffectSettings {
         case vignetteIntensity
         case vignetteRadius
         case grainAmount
+        case grainSize
         case hsl
         case colorGrading
     }
@@ -241,6 +246,7 @@ extension PhotoEffectSettings {
         vignetteIntensity = try container.decodeIfPresent(Double.self, forKey: .vignetteIntensity) ?? defaults.vignetteIntensity
         vignetteRadius = try container.decodeIfPresent(Double.self, forKey: .vignetteRadius) ?? defaults.vignetteRadius
         grainAmount = try container.decodeIfPresent(Double.self, forKey: .grainAmount) ?? defaults.grainAmount
+        grainSize = try container.decodeIfPresent(Double.self, forKey: .grainSize) ?? defaults.grainSize
         hsl = try container.decodeIfPresent(HSLAdjustments.self, forKey: .hsl) ?? defaults.hsl
         colorGrading = try container.decodeIfPresent(ColorGradingSettings.self, forKey: .colorGrading) ?? defaults.colorGrading
     }
@@ -262,6 +268,7 @@ extension PhotoEffectSettings {
         try container.encode(vignetteIntensity, forKey: .vignetteIntensity)
         try container.encode(vignetteRadius, forKey: .vignetteRadius)
         try container.encode(grainAmount, forKey: .grainAmount)
+        try container.encode(grainSize, forKey: .grainSize)
         try container.encode(hsl, forKey: .hsl)
         try container.encode(colorGrading, forKey: .colorGrading)
     }

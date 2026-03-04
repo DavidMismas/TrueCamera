@@ -1,4 +1,5 @@
 @preconcurrency internal import AVFoundation
+import AudioToolbox
 import Combine
 import Foundation
 import ImageIO
@@ -10,6 +11,7 @@ nonisolated struct CameraLens: Identifiable, Hashable, Sendable {
     let name: String
     let deviceType: AVCaptureDevice.DeviceType
     let position: AVCaptureDevice.Position
+    let isCropped: Bool
     /// Zoom factor to apply via videoZoomFactor (1.0 = native, 2.0 = 2x crop).
     let zoomFactor: CGFloat
     /// Sort order for UI display (lower = wider).
@@ -117,10 +119,35 @@ nonisolated enum PhotoResolutionCap: String, CaseIterable, Identifiable, Sendabl
     }
 }
 
+nonisolated enum CameraShutterSoundProfile: String, CaseIterable, Identifiable, Sendable {
+    case system
+    case snap
+    case soft
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .snap: return "Snap"
+        case .soft: return "Soft"
+        }
+    }
+
+    fileprivate var resourceName: String? {
+        switch self {
+        case .system: return nil
+        case .snap: return "shutter_snap"
+        case .soft: return "shutter_soft"
+        }
+    }
+}
+
 final class CameraService: NSObject, ObservableObject {
     private enum PreferenceKey {
         static let hapticsEnabled = "camera.hapticsEnabled"
         static let shutterSoundEnabled = "camera.shutterSoundEnabled"
+        static let shutterSoundProfile = "camera.shutterSoundProfile"
         static let captureFormat = "camera.captureFormat"
         static let capturePriority = "camera.capturePriority"
         static let resolutionCap = "camera.resolutionCap"
@@ -156,6 +183,12 @@ final class CameraService: NSObject, ObservableObject {
     }
     @Published var shutterSoundEnabled: Bool {
         didSet { UserDefaults.standard.set(shutterSoundEnabled, forKey: PreferenceKey.shutterSoundEnabled) }
+    }
+    @Published var shutterSoundProfile: CameraShutterSoundProfile {
+        didSet {
+            UserDefaults.standard.set(shutterSoundProfile.rawValue, forKey: PreferenceKey.shutterSoundProfile)
+            reloadCustomShutterSoundIfNeeded()
+        }
     }
     @Published var captureFormat: CameraCaptureFormat {
         didSet {
@@ -233,6 +266,7 @@ final class CameraService: NSObject, ObservableObject {
     private let prewarmQueue = DispatchQueue(label: "com.movieshot.export.prewarm", qos: .utility)
     private let exportQueue = DispatchQueue(label: "com.movieshot.export", qos: .userInitiated)
     private let shutterHapticGenerator = UIImpactFeedbackGenerator(style: .medium)
+    private var customShutterSoundID: SystemSoundID = 0
     private let tapToContinuousFocusDelay: TimeInterval = 0.75
     private let longPressFocusLockDelay: TimeInterval = 0.25
     private var focusLockRequested = false
@@ -253,6 +287,20 @@ final class CameraService: NSObject, ObservableObject {
     var isShutterSoundToggleAvailable: Bool {
         if #available(iOS 18.0, *) { return photoOutput.isShutterSoundSuppressionSupported }
         return false
+    }
+
+    var isCustomShutterSoundSelectionAvailable: Bool {
+        isShutterSoundToggleAvailable
+    }
+
+    private var shouldUseCustomShutterSound: Bool {
+        shutterSoundEnabled &&
+            shutterSoundProfile != .system &&
+            isCustomShutterSoundSelectionAvailable
+    }
+
+    private var shouldAllowSystemShutterSound: Bool {
+        shutterSoundEnabled && !shouldUseCustomShutterSound
     }
 
     override init() {
@@ -277,6 +325,8 @@ final class CameraService: NSObject, ObservableObject {
         )
         self.hapticsEnabled = UserDefaults.standard.object(forKey: PreferenceKey.hapticsEnabled) as? Bool ?? true
         self.shutterSoundEnabled = UserDefaults.standard.object(forKey: PreferenceKey.shutterSoundEnabled) as? Bool ?? true
+        let storedShutterSoundProfileRaw = UserDefaults.standard.string(forKey: PreferenceKey.shutterSoundProfile)
+        self.shutterSoundProfile = CameraShutterSoundProfile(rawValue: storedShutterSoundProfileRaw ?? "") ?? .system
         let storedCaptureFormatRaw = UserDefaults.standard.string(forKey: PreferenceKey.captureFormat)
         self.captureFormat = CameraCaptureFormat(rawValue: storedCaptureFormatRaw ?? "") ?? .appleProRAW
         let storedCapturePriorityRaw = UserDefaults.standard.string(forKey: PreferenceKey.capturePriority)
@@ -308,12 +358,18 @@ final class CameraService: NSObject, ObservableObject {
                 self?.shutterHapticGenerator.prepare()
             }
         }
+        reloadCustomShutterSoundIfNeeded()
+    }
+
+    deinit {
+        disposeCustomShutterSound()
     }
 
     func capturePhoto() {
         guard isSessionRunning else { return }
         prewarmExportWorkItem?.cancel()
         prewarmExportWorkItem = nil
+        playCustomShutterSoundIfNeeded()
         if hapticsEnabled {
             DispatchQueue.main.async { [weak self] in
                 self?.shutterHapticGenerator.impactOccurred(intensity: 0.9)
@@ -326,6 +382,43 @@ final class CameraService: NSObject, ObservableObject {
             DispatchQueue.main.async { self.isCaptureInProgress = true }
             self.capturePhotoNow()
         }
+    }
+
+    private func playCustomShutterSoundIfNeeded() {
+        guard shouldUseCustomShutterSound else { return }
+        if customShutterSoundID == 0 {
+            reloadCustomShutterSoundIfNeeded()
+        }
+        guard customShutterSoundID != 0 else { return }
+        AudioServicesPlaySystemSound(customShutterSoundID)
+    }
+
+    private func reloadCustomShutterSoundIfNeeded() {
+        disposeCustomShutterSound()
+        guard shouldUseCustomShutterSound,
+              let resourceName = shutterSoundProfile.resourceName else { return }
+
+        let bundle = Bundle.main
+        let url = bundle.url(forResource: resourceName, withExtension: "wav", subdirectory: "Sounds")
+            ?? bundle.url(forResource: resourceName, withExtension: "wav")
+        guard let soundURL = url else {
+            print("CameraService: missing shutter sound resource \(resourceName).wav")
+            return
+        }
+
+        var soundID: SystemSoundID = 0
+        let status = AudioServicesCreateSystemSoundID(soundURL as CFURL, &soundID)
+        guard status == kAudioServicesNoError else {
+            print("CameraService: failed to load shutter sound \(resourceName) with status \(status)")
+            return
+        }
+        customShutterSoundID = soundID
+    }
+
+    private func disposeCustomShutterSound() {
+        guard customShutterSoundID != 0 else { return }
+        AudioServicesDisposeSystemSoundID(customShutterSoundID)
+        customShutterSoundID = 0
     }
 
     func requestPermissionIfNeeded() {
@@ -520,6 +613,9 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func selectLens(_ lens: CameraLens) {
+        DispatchQueue.main.async { [weak self] in
+            self?.selectedLens = lens
+        }
         sessionQueue.async { [weak self] in
             guard let self, lens.position == self.currentPosition else { return }
             self.configureInput(for: lens)
@@ -572,6 +668,7 @@ final class CameraService: NSObject, ObservableObject {
                     name: "Front",
                     deviceType: device.deviceType,
                     position: device.position,
+                    isCropped: false,
                     zoomFactor: 1.0,
                     sortOrder: 10
                 )
@@ -590,6 +687,7 @@ final class CameraService: NSObject, ObservableObject {
                     name: "14mm",
                     deviceType: ultraDevice.deviceType,
                     position: ultraDevice.position,
+                    isCropped: false,
                     zoomFactor: 1.0,
                     sortOrder: 140
                 )
@@ -605,6 +703,7 @@ final class CameraService: NSObject, ObservableObject {
                     name: "24mm",
                     deviceType: wideDevice.deviceType,
                     position: wideDevice.position,
+                    isCropped: false,
                     zoomFactor: 1.0,
                     sortOrder: 240
                 )
@@ -616,9 +715,10 @@ final class CameraService: NSObject, ObservableObject {
                 lenses.append(
                     CameraLens(
                         id: "\(pos)-\(type)-35mm-crop",
-                        name: "35mm crop",
+                        name: "35mm",
                         deviceType: wideDevice.deviceType,
                         position: wideDevice.position,
+                        isCropped: true,
                         zoomFactor: CGFloat(crop35Zoom),
                         sortOrder: 350
                     )
@@ -628,9 +728,10 @@ final class CameraService: NSObject, ObservableObject {
                 lenses.append(
                     CameraLens(
                         id: "\(pos)-\(type)-50mm-crop",
-                        name: "50mm crop",
+                        name: "50mm",
                         deviceType: wideDevice.deviceType,
                         position: wideDevice.position,
+                        isCropped: true,
                         zoomFactor: CGFloat(crop50Zoom),
                         sortOrder: 500
                     )
@@ -648,6 +749,7 @@ final class CameraService: NSObject, ObservableObject {
                     name: "\(teleMM)mm",
                     deviceType: teleDevice.deviceType,
                     position: teleDevice.position,
+                    isCropped: false,
                     zoomFactor: 1.0,
                     sortOrder: teleMM * 10
                 )
@@ -659,9 +761,10 @@ final class CameraService: NSObject, ObservableObject {
                 lenses.append(
                     CameraLens(
                         id: "\(pos)-\(type)-tele-2x-crop",
-                        name: "\(teleCropMM)mm crop",
+                        name: "\(teleCropMM)mm",
                         deviceType: teleDevice.deviceType,
                         position: teleDevice.position,
+                        isCropped: true,
                         zoomFactor: 2.0,
                         sortOrder: teleCropMM * 10 + 1
                     )
@@ -677,6 +780,7 @@ final class CameraService: NSObject, ObservableObject {
                     name: "24mm",
                     deviceType: fallback.deviceType,
                     position: fallback.position,
+                    isCropped: false,
                     zoomFactor: 1.0,
                     sortOrder: 240
                 )
@@ -872,7 +976,7 @@ final class CameraService: NSObject, ObservableObject {
         }
         settings.photoQualityPrioritization = capturePriority.photoQualityPrioritization
         if #available(iOS 18.0, *), photoOutput.isShutterSoundSuppressionSupported {
-            settings.isShutterSoundSuppressionEnabled = !shutterSoundEnabled
+            settings.isShutterSoundSuppressionEnabled = !shouldAllowSystemShutterSound
         }
         if let connection = photoOutput.connection(with: .video), connection.isVideoMirroringSupported {
             connection.isVideoMirrored = currentPosition == .front

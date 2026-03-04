@@ -83,14 +83,16 @@ final class PhotoEffectsProcessor {
             preferredProcessingSource: preferredProcessingSource
         ) else { return nil }
         let exportPixelCount = Int64(max(0.0, Double(input.extent.integral.width * input.extent.integral.height)))
-        // Grain intentionally excluded from final styled export.
-        let graded = apply(
+        var graded = apply(
             to: input,
             settings: settings,
             includeGrain: false,
             cubeDimension: exportCubeDimension,
             pixelCountHint: exportPixelCount
         )
+        if settings.grainAmount > 0.0001 {
+            graded = addGrain(to: graded, amount: settings.grainAmount, size: settings.grainSize)
+        }
         let options: [CIImageRepresentationOption: Any] = [
             kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 1.0,
             kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true,
@@ -365,7 +367,7 @@ final class PhotoEffectsProcessor {
         }
 
         if includeGrain, settings.grainAmount > 0.0001 {
-            output = addGrain(to: output, amount: settings.grainAmount)
+            output = addGrain(to: output, amount: settings.grainAmount, size: settings.grainSize)
         }
 
         return output.cropped(to: image.extent)
@@ -626,7 +628,9 @@ final class PhotoEffectsProcessor {
         let saturation = rgbSaturation(output)
         // Avoid tint speckling and blotchy artifacts in near-neutral fog/sky regions.
         let chromaWeight = smoothstep(0.10, 0.34, saturation)
-        guard chromaWeight > 0.0001 else { return output }
+        // Shadows can tolerate slightly lower chroma than global/highlights before tinting.
+        let shadowChromaWeight = smoothstep(0.08, 0.30, saturation)
+        guard max(chromaWeight, shadowChromaWeight) > 0.0001 else { return output }
 
         let luminance = dot(output, SIMD3<Double>(0.2126, 0.7152, 0.0722))
         // Very dark values carry the most chroma noise; tinting them causes blotchy patterns.
@@ -643,15 +647,18 @@ final class PhotoEffectsProcessor {
             )
         }
 
-        // Keep shadow toning stronger in mid-shadows, not near-black noise floor.
-        let shadowWeight = 1 - smoothstep(0.18, 0.62, luminance)
+        // Bias shadows toward darker tonal regions and reduce bleed into mid-tones.
+        let shadowDeepToneGuard = smoothstep(0.05, 0.18, luminance)
+        let shadowDetailGuard = smoothstep(0.03, 0.13, luminance)
+        let shadowProtectedWeight = shadowChromaWeight * shadowDeepToneGuard * shadowDetailGuard * highlightGuard
+        let shadowWeight = 1 - smoothstep(0.16, 0.50, luminance)
         let highlightWeight = smoothstep(0.45, 0.88, luminance)
 
         if grading.shadows.amount > 0.0001 {
             output = toneBand(
                 output,
                 toward: hueToneColor(grading.shadows.hue, saturation: 0.68 + (0.32 * chromaWeight)),
-                t: grading.shadows.amount * shadowWeight * 0.62 * protectedWeight
+                t: grading.shadows.amount * shadowWeight * 0.62 * shadowProtectedWeight
             )
         }
         if grading.highlights.amount > 0.0001 {
@@ -856,39 +863,126 @@ final class PhotoEffectsProcessor {
         min(max(value, minValue), maxValue)
     }
 
-    nonisolated private func addGrain(to image: CIImage, amount: Double) -> CIImage {
+    nonisolated private func addGrain(to image: CIImage, amount: Double, size: Double) -> CIImage {
+        let strength = clamp(amount, 0, 1)
+        guard strength > 0.0001 else { return image }
+        let sizeFactor = clamp(size, PhotoEffectSettings.grainSizeRange.lowerBound, PhotoEffectSettings.grainSizeRange.upperBound)
+        let sizeRange = PhotoEffectSettings.grainSizeRange
+        let normalizedSize = clamp(
+            (sizeFactor - sizeRange.lowerBound) / (sizeRange.upperBound - sizeRange.lowerBound),
+            0,
+            1
+        )
+        // Use scale >= 1.0 to avoid aliasing/checker artifacts from downsampling random noise.
+        let fineScale = 1.00 + (1.20 * normalizedSize)
+        let coarseScale = 1.00 + (2.75 * pow(normalizedSize, 1.12))
+        let fineBlur = 0.05 + (0.46 * pow(normalizedSize, 1.08))
+        let coarseBlur = 0.16 + (1.75 * pow(normalizedSize, 1.28))
+        let fineContrast = 3.00 - (0.55 * normalizedSize)
+        let coarseContrast = 2.20 - (0.72 * normalizedSize)
+        let fineAlpha = clamp(
+            0.15 + (0.34 * strength) + (0.07 * normalizedSize * strength),
+            0,
+            1
+        )
+        let coarseAlpha = clamp(
+            0.03 + (0.12 * strength) + (0.23 * normalizedSize * strength),
+            0,
+            1
+        )
         let extent = image.extent
 
-        let random = CIFilter.randomGenerator()
-        guard var noise = random.outputImage?.cropped(to: extent) else { return image }
+        guard
+            let fineNoise = makeFilmGrainLayer(
+                extent: extent,
+                scale: CGFloat(fineScale),
+                blurRadius: fineBlur,
+                contrast: fineContrast,
+                alpha: fineAlpha,
+                rotationDegrees: 11.0,
+                translation: CGPoint(x: extent.width * 0.013, y: extent.height * -0.009)
+            ),
+            let coarseNoise = makeFilmGrainLayer(
+                extent: extent,
+                scale: CGFloat(coarseScale),
+                blurRadius: coarseBlur,
+                contrast: coarseContrast,
+                alpha: coarseAlpha,
+                rotationDegrees: -17.0,
+                translation: CGPoint(x: extent.width * -0.019, y: extent.height * 0.015)
+            )
+        else { return image }
 
-        let monochrome = CIFilter.colorMonochrome()
-        monochrome.inputImage = noise
-        monochrome.intensity = 1
-        monochrome.color = CIColor(red: 0.5, green: 0.5, blue: 0.5)
-        if let monoNoise = monochrome.outputImage {
-            noise = monoNoise
+        let fineBlend = CIFilter.softLightBlendMode()
+        fineBlend.inputImage = fineNoise
+        fineBlend.backgroundImage = image
+        let withFine = fineBlend.outputImage?.cropped(to: extent) ?? image
+
+        let coarseBlend = CIFilter.overlayBlendMode()
+        coarseBlend.inputImage = coarseNoise
+        coarseBlend.backgroundImage = withFine
+        return coarseBlend.outputImage?.cropped(to: extent) ?? withFine
+    }
+
+    nonisolated private func makeFilmGrainLayer(
+        extent: CGRect,
+        scale: CGFloat,
+        blurRadius: Double,
+        contrast: Double,
+        alpha: Double,
+        rotationDegrees: Double,
+        translation: CGPoint
+    ) -> CIImage? {
+        let random = CIFilter.randomGenerator()
+        guard var noise = random.outputImage else { return nil }
+
+        var transform = CGAffineTransform.identity
+        if abs(scale - 1.0) > 0.0001 {
+            transform = transform.scaledBy(x: scale, y: scale)
+        }
+        if abs(rotationDegrees) > 0.0001 {
+            transform = transform.rotated(by: CGFloat(rotationDegrees * .pi / 180.0))
+        }
+        if abs(translation.x) > 0.0001 || abs(translation.y) > 0.0001 {
+            transform = transform.translatedBy(x: translation.x, y: translation.y)
+        }
+        if !transform.isIdentity {
+            noise = noise.transformed(by: transform)
+        }
+        noise = noise.cropped(to: extent)
+
+        let toMono = CIFilter.colorMatrix()
+        toMono.inputImage = noise
+        let luma = CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0)
+        toMono.rVector = luma
+        toMono.gVector = luma
+        toMono.bVector = luma
+        toMono.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+        toMono.biasVector = CIVector(x: 0, y: 0, z: 0, w: 0)
+        guard var mono = toMono.outputImage?.cropped(to: extent) else { return nil }
+
+        if blurRadius > 0.0001 {
+            let blur = CIFilter.gaussianBlur()
+            blur.inputImage = mono
+            blur.radius = Float(blurRadius)
+            if let blurred = blur.outputImage?.cropped(to: extent) {
+                mono = blurred
+            }
         }
 
-        let noisyContrast = CIFilter.colorControls()
-        noisyContrast.inputImage = noise
-        noisyContrast.contrast = 1.8
-        noisyContrast.brightness = -0.05
-        if let shapedNoise = noisyContrast.outputImage {
-            noise = shapedNoise
+        let shape = CIFilter.colorControls()
+        shape.inputImage = mono
+        shape.saturation = 0
+        shape.contrast = Float(contrast)
+        shape.brightness = 0
+        if let shaped = shape.outputImage?.cropped(to: extent) {
+            mono = shaped
         }
 
         let alphaMatrix = CIFilter.colorMatrix()
-        alphaMatrix.inputImage = noise
-        alphaMatrix.aVector = CIVector(x: 0, y: 0, z: 0, w: amount)
+        alphaMatrix.inputImage = mono
+        alphaMatrix.aVector = CIVector(x: 0, y: 0, z: 0, w: alpha)
         alphaMatrix.biasVector = CIVector(x: 0, y: 0, z: 0, w: 0)
-        if let alphaNoise = alphaMatrix.outputImage {
-            noise = alphaNoise
-        }
-
-        let blend = CIFilter.overlayBlendMode()
-        blend.inputImage = noise
-        blend.backgroundImage = image
-        return blend.outputImage?.cropped(to: extent) ?? image
+        return alphaMatrix.outputImage?.cropped(to: extent) ?? mono
     }
 }

@@ -116,8 +116,6 @@ struct ContentView: View {
     @State private var pendingCaptureJobs: [PendingCaptureJob] = []
     @State private var backgroundProcessorTask: Task<Void, Never>?
     @State private var backgroundProcessingInFlight = false
-    @State private var backgroundQueueBadgeRotation: Double = 0
-    @State private var backgroundQueueBadgePulse = false
     private let maxPendingBackgroundCaptures = 3
     private let themeTeal = Color(red: 0.07, green: 0.74, blue: 0.70)
     private let themePink = Color(red: 0.95, green: 0.54, blue: 0.75)
@@ -125,6 +123,8 @@ struct ContentView: View {
     private let themeTextSecondary = Color(red: 0.82, green: 0.83, blue: 0.9)
     private let themeBackgroundTop = Color(red: 0.06, green: 0.09, blue: 0.13)
     private let themeBackgroundBottom = Color(red: 0.03, green: 0.05, blue: 0.08)
+    private let topControlsHorizontalPadding: CGFloat = 24
+    private let exposureHorizontalPadding: CGFloat = 20
 
     private var backgroundQueueIsFull: Bool {
         let totalPending = pendingCaptureJobs.count + (backgroundProcessingInFlight ? 1 : 0)
@@ -154,46 +154,59 @@ struct ContentView: View {
                             .padding(.trailing, 12)
                         cameraSwitchButton
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 22)
-                    .padding(.bottom, 10)
+                    .padding(.horizontal, topControlsHorizontalPadding)
+                    .padding(.top, 16)
+                    .padding(.bottom, 6)
 
-                    ZStack {
-                        CameraPreviewView(
-                            session: cameraService.session,
-                            activeDevice: cameraService.activeVideoDevice,
-                            onTapToFocus: { _, devicePoint in
-                                cameraService.focus(at: devicePoint, lockFocus: false)
-                            },
-                            onLongPressToFocusLock: { _, devicePoint in
-                                cameraService.focus(at: devicePoint, lockFocus: true)
+                    GeometryReader { proxy in
+                        let targetWidth = max(0, proxy.size.width - (exposureHorizontalPadding * 2))
+                        let maxWidthFromHeight = max(0, proxy.size.height * (3.0 / 4.0))
+                        let previewWidth = min(targetWidth, maxWidthFromHeight)
+                        let previewHeight = previewWidth * (4.0 / 3.0)
+
+                        ZStack {
+                            CameraPreviewView(
+                                session: cameraService.session,
+                                activeDevice: cameraService.activeVideoDevice,
+                                focusLocked: cameraService.focusLocked,
+                                onTapToFocus: { _, devicePoint in
+                                    cameraService.focus(at: devicePoint, lockFocus: false)
+                                },
+                                onLongPressToFocusLock: { _, devicePoint in
+                                    cameraService.focus(at: devicePoint, lockFocus: true)
+                                }
+                            )
+                            .frame(width: previewWidth, height: previewHeight)
+                            .overlay(alignment: .top) {
+                                if backgroundQueueCount > 0 {
+                                    backgroundQueueIndicator
+                                        .padding(.top, 10)
+                                }
                             }
-                        )
-                        .aspectRatio(3.0 / 4.0, contentMode: .fit)
-                        .overlay(alignment: .top) {
-                            if backgroundQueueCount > 0 {
-                                backgroundQueueIndicator
-                                    .padding(.top, 10)
-                            }
+                            .overlay(
+                                Rectangle()
+                                    .stroke(themeTeal, lineWidth: 1)
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                         }
-                        .overlay(
-                            Rectangle()
-                                .stroke(themeTeal, lineWidth: 1)
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    VStack(spacing: 0) {
+                        exposureSlider
+                            .padding(.top, 8)
 
-                    exposureSlider
-                        .padding(.top, 14)
+                        presetStrip
+                            .padding(.top, 8)
 
-                    presetStrip
-                        .padding(.top, 12)
-
-                    controls
-                        .padding(.horizontal, 24)
-                        .padding(.top, 12)
-                        .padding(.bottom, 8)
+                        controls
+                            .padding(.horizontal, 24)
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
+                    }
+                    .padding(.bottom, 0)
                 }
 
             case .denied, .restricted:
@@ -270,9 +283,6 @@ struct ContentView: View {
         .onChange(of: cameraService.appleProRAWSupported) { _, _ in
             normalizeCaptureFormatSelection()
         }
-        .onChange(of: backgroundQueueCount) { oldCount, newCount in
-            handleBackgroundQueueCountChange(from: oldCount, to: newCount)
-        }
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
             updateControlRotation(for: UIDevice.current.orientation)
         }
@@ -291,9 +301,6 @@ struct ContentView: View {
                 referenceRenderTask = nil
                 renderedReferenceImage = nil
             }
-        }
-        .onAppear {
-            handleBackgroundQueueCountChange(from: 0, to: backgroundQueueCount)
         }
     }
 
@@ -332,7 +339,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .opacity(abs(cameraService.exposureBias) > 0.05 ? 1 : 0.3)
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, exposureHorizontalPadding)
     }
 
     private var presetStrip: some View {
@@ -386,23 +393,19 @@ struct ContentView: View {
     }
 
     private var controlButtons: some View {
-        HStack(spacing: 12) {
-            HStack {
+        ZStack(alignment: .center) {
+            HStack(alignment: .center) {
                 lensSelector
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            shutterButton
-
-            HStack {
-                Spacer(minLength: 0)
+                Spacer()
                 galleryButton
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            
+            shutterButton
         }
+        .frame(maxWidth: .infinity, minHeight: 92, alignment: .center)
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
     }
 
     // MARK: - Buttons
@@ -498,37 +501,47 @@ struct ContentView: View {
     }
 
     private var lensSelector: some View {
-        Menu {
-            if cameraService.availableLenses.isEmpty {
-                Button("No lenses available") {}
-                    .disabled(true)
+        HStack(spacing: 0) {
+            if let currentLens {
+                lensTitle(currentLens, textFont: .footnote.weight(.semibold))
             } else {
-                ForEach(cameraService.availableLenses) { lens in
-                    Button {
-                        cameraService.selectLens(lens)
-                    } label: {
-                        if cameraService.selectedLens?.id == lens.id {
-                            Label(lens.name, systemImage: "checkmark")
-                        } else {
-                            Text(lens.name)
+                Text("Lens")
+                    .font(.footnote.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .foregroundStyle(themePink.opacity(0.95))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .overlay {
+            // Invisible menu overlapping the hit area
+            Menu {
+                if cameraService.availableLenses.isEmpty {
+                    Button("No lenses available") {}
+                        .disabled(true)
+                } else {
+                    ForEach(cameraService.availableLenses) { lens in
+                        Button {
+                            cameraService.selectLens(lens)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text(lensMenuTitle(lens))
+                                    .font(.body)
+                                Spacer(minLength: 8)
+                                if cameraService.selectedLens?.id == lens.id {
+                                    Image(systemName: "checkmark")
+                                        .font(.caption.weight(.bold))
+                                }
+                            }
                         }
                     }
                 }
+            } label: {
+                Color.black.opacity(0.001)
             }
-        } label: {
-            HStack(spacing: 6) {
-                Text(currentLensName)
-                    .font(.footnote.weight(.semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption2.weight(.bold))
-            }
-            .foregroundStyle(themePink.opacity(0.95))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 8)
         }
-        .frame(width: 78)
         .disabled(cameraService.availableLenses.isEmpty)
         .tint(themePink)
         .rotationEffect(controlRotationAngle, anchor: .center)
@@ -536,8 +549,28 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    private var currentLensName: String {
-        cameraService.selectedLens?.name ?? cameraService.availableLenses.first?.name ?? "Lens"
+    @ViewBuilder
+    private func lensTitle(_ lens: CameraLens, textFont: Font) -> some View {
+        HStack(spacing: 5) {
+            Text(lens.name)
+                .font(textFont)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(1)
+            if lens.isCropped {
+                Text("●")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(themePink)
+            }
+        }
+    }
+
+    private func lensMenuTitle(_ lens: CameraLens) -> String {
+        lens.isCropped ? "\(lens.name) ●" : lens.name
+    }
+
+    private var currentLens: CameraLens? {
+        cameraService.selectedLens ?? cameraService.availableLenses.first
     }
 
     // MARK: - Permission denied view
@@ -580,6 +613,13 @@ struct ContentView: View {
                     Toggle("Haptic Feedback", isOn: $cameraService.hapticsEnabled)
                     if cameraService.isShutterSoundToggleAvailable {
                         Toggle("Shutter Sound", isOn: $cameraService.shutterSoundEnabled)
+                        Picker("Shutter Tone", selection: $cameraService.shutterSoundProfile) {
+                            ForEach(CameraShutterSoundProfile.allCases) { tone in
+                                Text(tone.label).tag(tone)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .disabled(!cameraService.shutterSoundEnabled)
                     }
                 }
 
@@ -913,6 +953,11 @@ struct ContentView: View {
                             title: "Grain",
                             value: effectBinding(\.grainAmount),
                             range: PhotoEffectSettings.grainAmountRange
+                        )
+                        effectSlider(
+                            title: "Grain Size",
+                            value: effectBinding(\.grainSize),
+                            range: PhotoEffectSettings.grainSizeRange
                         )
                     }
                 }
@@ -1265,45 +1310,21 @@ struct ContentView: View {
     }
 
     private var backgroundQueueIndicator: some View {
-        ZStack {
+        HStack(spacing: 6) {
             Circle()
-                .fill(themeBackgroundTop.opacity(0.78))
-                .frame(width: 34, height: 34)
-            Circle()
-                .stroke(themePink.opacity(0.22), lineWidth: 1)
-                .frame(width: 34, height: 34)
-            Circle()
-                .trim(from: 0.18, to: 0.92)
-                .stroke(themeTeal, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                .frame(width: 34, height: 34)
-                .rotationEffect(.degrees(backgroundQueueBadgeRotation))
-                .scaleEffect(backgroundQueueBadgePulse ? 1.06 : 0.95)
-
-            Text("\(backgroundQueueCount)")
-                .font(.caption2.monospacedDigit().weight(.bold))
-                .foregroundStyle(themePink)
+                .fill(themePink)
+                .frame(width: 5, height: 5)
+            Text("processing, do not close the app.")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
+        .foregroundStyle(themePink.opacity(0.96))
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(themeBackgroundTop.opacity(0.78), in: Capsule())
+        .overlay(Capsule().stroke(themePink.opacity(0.3), lineWidth: 1))
         .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 4)
-    }
-
-    private func handleBackgroundQueueCountChange(from oldCount: Int, to newCount: Int) {
-        if oldCount == 0, newCount > 0 {
-            backgroundQueueBadgeRotation = 0
-            backgroundQueueBadgePulse = false
-            withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
-                backgroundQueueBadgeRotation = 360
-            }
-            withAnimation(.easeInOut(duration: 0.68).repeatForever(autoreverses: true)) {
-                backgroundQueueBadgePulse = true
-            }
-            return
-        }
-        if oldCount > 0, newCount == 0 {
-            withAnimation(.easeOut(duration: 0.18)) {
-                backgroundQueueBadgeRotation = 0
-                backgroundQueueBadgePulse = false
-            }
-        }
     }
 
     // MARK: - Processing UI

@@ -1,5 +1,6 @@
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import CoreVideo
 import ImageIO
 import UIKit
 import simd
@@ -18,18 +19,28 @@ final class PhotoEffectsProcessor {
     private let previewContext: CIContext
     private let exportContext: CIContext
     private let exportColorSpace: CGColorSpace
+    private let workingColorSpace: CGColorSpace
     private let previewCubeDimension = 14
     private let exportCubeDimension = 96
     private let cubeCacheLock = NSLock()
     nonisolated(unsafe) private var colorCubeCache: [ColorCubeKey: Data] = [:]
 
     nonisolated init(
-        previewContext: CIContext = CIContext(options: [.cacheIntermediates: false]),
-        exportContext: CIContext = PhotoEffectsProcessor.makeHighPrecisionExportContext()
+        previewContext: CIContext? = nil,
+        exportContext: CIContext? = nil
     ) {
-        self.previewContext = previewContext
-        self.exportContext = exportContext
+        let workingSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        self.workingColorSpace = workingSpace
         self.exportColorSpace = PhotoEffectsProcessor.makeExportColorSpace()
+        
+        // Define an explicit working format and space for consistent preview math
+        let previewOptions: [CIContextOption: Any] = [
+            .cacheIntermediates: false,
+            .workingFormat: CIFormat.RGBAh.rawValue,
+            .workingColorSpace: workingSpace
+        ]
+        self.previewContext = previewContext ?? CIContext(options: previewOptions)
+        self.exportContext = exportContext ?? PhotoEffectsProcessor.makeHighPrecisionExportContext(workingSpace: workingSpace)
     }
 
     nonisolated func renderPreviewImage(
@@ -39,7 +50,12 @@ final class PhotoEffectsProcessor {
         maxDimension: CGFloat = 960
     ) -> UIImage? {
         let orientation: CGImagePropertyOrientation = isFrontCamera ? .rightMirrored : .right
-        let input = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
+        
+        // Extract native buffer space if available, fallback to standard sRGB
+        let bufferSpace = CVImageBufferGetColorSpace(pixelBuffer)?.takeUnretainedValue() ?? CGColorSpace(name: CGColorSpace.sRGB)
+        
+        // Explicitly inform CoreImage of the buffer's color space to prevent implicit conversions
+        let input = CIImage(cvPixelBuffer: pixelBuffer, options: [.colorSpace: bufferSpace as Any]).oriented(orientation)
         let graded = apply(
             to: input,
             settings: settings,
@@ -222,16 +238,12 @@ final class PhotoEffectsProcessor {
             CGColorSpaceCreateDeviceRGB()
     }
 
-    nonisolated private static func makeHighPrecisionExportContext() -> CIContext {
-        var options: [CIContextOption: Any] = [
+    nonisolated private static func makeHighPrecisionExportContext(workingSpace: CGColorSpace) -> CIContext {
+        let options: [CIContextOption: Any] = [
             .cacheIntermediates: true,
             .workingFormat: CIFormat.RGBAh.rawValue,
+            .workingColorSpace: workingSpace
         ]
-        if let linearP3 = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) {
-            options[.workingColorSpace] = linearP3
-        } else if let linearSRGB = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) {
-            options[.workingColorSpace] = linearSRGB
-        }
         return CIContext(options: options)
     }
 
@@ -274,6 +286,17 @@ final class PhotoEffectsProcessor {
             }
         }
 
+        if abs(settings.warmth) > 0.5 || abs(settings.tint) > 0.5 {
+            let temp = CIFilter.temperatureAndTint()
+            temp.inputImage = output
+            temp.neutral = CIVector(x: 6500, y: 0)
+            // UX mapping: positive warmth = warmer, positive tint = magenta.
+            temp.targetNeutral = CIVector(x: 6500 - settings.warmth, y: -settings.tint)
+            if let processed = temp.outputImage {
+                output = processed
+            }
+        }
+
         if abs(settings.highlights) > 0.0001 || abs(settings.shadows) > 0.0001 {
             let tonal = CIFilter.highlightShadowAdjust()
             tonal.inputImage = output
@@ -304,16 +327,6 @@ final class PhotoEffectsProcessor {
             }
         }
 
-        if abs(settings.warmth) > 0.5 || abs(settings.tint) > 0.5 {
-            let temp = CIFilter.temperatureAndTint()
-            temp.inputImage = output
-            temp.neutral = CIVector(x: 6500, y: 0)
-            // UX mapping: positive warmth = warmer, positive tint = magenta.
-            temp.targetNeutral = CIVector(x: 6500 - settings.warmth, y: -settings.tint)
-            if let processed = temp.outputImage {
-                output = processed
-            }
-        }
 
         if shouldApplyColorCube(for: settings) {
             if shouldApplyShadowChromaStabilization(
@@ -442,7 +455,7 @@ final class PhotoEffectsProcessor {
         colorCube.setValue(image, forKey: kCIInputImageKey)
         colorCube.setValue(cubeDimension, forKey: "inputCubeDimension")
         colorCube.setValue(cubeData, forKey: "inputCubeData")
-        if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) {
+        if let colorSpace = CGColorSpace(name: CGColorSpace.extendedSRGB) {
             colorCube.setValue(colorSpace, forKey: "inputColorSpace")
         }
 

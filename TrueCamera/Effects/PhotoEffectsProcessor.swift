@@ -85,12 +85,31 @@ final class PhotoEffectsProcessor {
         processedData: Data?,
         settings: PhotoEffectSettings,
         preferredHEIFBitDepth: StyledHEIFBitDepth = .tenBit,
-        preferredProcessingSource: StyledProcessingSource = .proRAW
-    ) -> (data: Data, uniformTypeIdentifier: String)? {
+        preferredProcessingSource: StyledProcessingSource = .proRAW,
+        saveJPG: Bool = false,
+        jpgQuality: Double = 0.85
+    ) -> (primary: (data: Data, uniformTypeIdentifier: String), jpgData: Data?)? {
         if shouldBypassNeutralProcessing(settings),
            let processedData,
            let passthroughUTI = detectedPassthroughUTI(for: processedData) {
-            return (data: processedData, uniformTypeIdentifier: passthroughUTI)
+            
+            let jpgData: Data?
+            if saveJPG {
+                if passthroughUTI == "public.jpeg" {
+                    jpgData = processedData
+                } else if let image = CIImage(data: processedData) {
+                    let options: [CIImageRepresentationOption: Any] = [
+                        kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: jpgQuality,
+                        kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true
+                    ]
+                    jpgData = exportContext.jpegRepresentation(of: image, colorSpace: exportColorSpace, options: options)
+                } else {
+                    jpgData = nil
+                }
+            } else {
+                jpgData = nil
+            }
+            return (primary: (data: processedData, uniformTypeIdentifier: passthroughUTI), jpgData: jpgData)
         }
 
         guard let input = makeExportInputImage(
@@ -113,18 +132,30 @@ final class PhotoEffectsProcessor {
             kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 1.0,
             kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true,
         ]
+        
+        var primary: (data: Data, uniformTypeIdentifier: String)? = nil
         if preferredHEIFBitDepth == .tenBit,
            #available(iOS 15.0, *),
            let heif10 = try? exportContext.heif10Representation(of: graded, colorSpace: exportColorSpace, options: options) {
-            return (data: heif10, uniformTypeIdentifier: "public.heic")
+            primary = (data: heif10, uniformTypeIdentifier: "public.heic")
+        } else if let heif = exportContext.heifRepresentation(of: graded, format: .RGBA8, colorSpace: exportColorSpace, options: options) {
+            primary = (data: heif, uniformTypeIdentifier: "public.heic")
+        } else if let jpeg = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: options) {
+            primary = (data: jpeg, uniformTypeIdentifier: "public.jpeg")
         }
-        if let heif = exportContext.heifRepresentation(of: graded, format: .RGBA8, colorSpace: exportColorSpace, options: options) {
-            return (data: heif, uniformTypeIdentifier: "public.heic")
+        
+        guard let primary else { return nil }
+        
+        var generatedJPG: Data? = nil
+        if saveJPG {
+            let jpgOptions: [CIImageRepresentationOption: Any] = [
+                kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: jpgQuality,
+                kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true,
+            ]
+            generatedJPG = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: jpgOptions)
         }
-        guard let jpeg = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: options) else {
-            return nil
-        }
-        return (data: jpeg, uniformTypeIdentifier: "public.jpeg")
+        
+        return (primary: primary, jpgData: generatedJPG)
     }
 
     nonisolated private func detectedPassthroughUTI(for data: Data) -> String? {

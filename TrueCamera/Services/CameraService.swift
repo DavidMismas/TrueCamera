@@ -155,6 +155,8 @@ final class CameraService: NSObject, ObservableObject {
         static let styledProcessingSource = "camera.styledProcessingSource"
         static let saveRAWToLibrary = "camera.saveRAWToLibrary"
         static let selectedEffectPresetID = "camera.selectedEffectPresetID"
+        static let saveJPGToLibrary = "camera.saveJPGToLibrary"
+        static let jpgCompressionQuality = "camera.jpgCompressionQuality"
         static let effectSettingsBlob = "camera.effect.settingsBlob.v3"
         static let effectPresetsBlob = "camera.effect.userPresetsBlob.v2"
     }
@@ -213,6 +215,12 @@ final class CameraService: NSObject, ObservableObject {
     }
     @Published var saveRAWToLibrary: Bool {
         didSet { UserDefaults.standard.set(saveRAWToLibrary, forKey: PreferenceKey.saveRAWToLibrary) }
+    }
+    @Published var saveJPGToLibrary: Bool {
+        didSet { UserDefaults.standard.set(saveJPGToLibrary, forKey: PreferenceKey.saveJPGToLibrary) }
+    }
+    @Published var jpgCompressionQuality: Double {
+        didSet { UserDefaults.standard.set(jpgCompressionQuality, forKey: PreferenceKey.jpgCompressionQuality) }
     }
     @Published var exposureBias: Float = 0 {
         didSet { applyExposureBias() }
@@ -338,6 +346,8 @@ final class CameraService: NSObject, ObservableObject {
         let storedProcessingSourceRaw = UserDefaults.standard.string(forKey: PreferenceKey.styledProcessingSource)
         self.styledProcessingSource = StyledProcessingSource(rawValue: storedProcessingSourceRaw ?? "") ?? .proRAW
         self.saveRAWToLibrary = UserDefaults.standard.object(forKey: PreferenceKey.saveRAWToLibrary) as? Bool ?? false
+        self.saveJPGToLibrary = UserDefaults.standard.object(forKey: PreferenceKey.saveJPGToLibrary) as? Bool ?? false
+        self.jpgCompressionQuality = UserDefaults.standard.object(forKey: PreferenceKey.jpgCompressionQuality) as? Double ?? 100.0
         let loadedPresets = Self.loadStoredEffectPresets()
         self.effectPresets = loadedPresets
         self.effectSettings = Self.loadStoredEffectSettings().clamped()
@@ -568,17 +578,21 @@ final class CameraService: NSObject, ObservableObject {
     func buildStyledPhotoData(
         rawData: Data?,
         processedData: Data?
-    ) async -> (data: Data, uniformTypeIdentifier: String)? {
+    ) async -> (primary: (data: Data, uniformTypeIdentifier: String), jpgData: Data?)? {
         guard rawData != nil || processedData != nil else { return nil }
         let settings = effectSettingsSnapshot()
         let exportBitDepth = styledHEIFBitDepth
         let processingSource = styledProcessingSource
+        let saveJPG = saveJPGToLibrary
+        let jpgQuality = jpgCompressionQuality / 100.0
         return await buildStyledPhotoData(
             rawData: rawData,
             processedData: processedData,
             settings: settings,
             preferredHEIFBitDepth: exportBitDepth,
-            preferredProcessingSource: processingSource
+            preferredProcessingSource: processingSource,
+            saveJPG: saveJPG,
+            jpgQuality: jpgQuality
         )
     }
 
@@ -587,8 +601,10 @@ final class CameraService: NSObject, ObservableObject {
         processedData: Data?,
         settings: PhotoEffectSettings,
         preferredHEIFBitDepth: StyledHEIFBitDepth,
-        preferredProcessingSource: StyledProcessingSource
-    ) async -> (data: Data, uniformTypeIdentifier: String)? {
+        preferredProcessingSource: StyledProcessingSource,
+        saveJPG: Bool,
+        jpgQuality: Double
+    ) async -> (primary: (data: Data, uniformTypeIdentifier: String), jpgData: Data?)? {
         guard rawData != nil || processedData != nil else { return nil }
         return await withCheckedContinuation { continuation in
             exportQueue.async { [weak self] in
@@ -601,7 +617,9 @@ final class CameraService: NSObject, ObservableObject {
                     processedData: processedData,
                     settings: settings,
                     preferredHEIFBitDepth: preferredHEIFBitDepth,
-                    preferredProcessingSource: preferredProcessingSource
+                    preferredProcessingSource: preferredProcessingSource,
+                    saveJPG: saveJPG,
+                    jpgQuality: jpgQuality
                 )
                 continuation.resume(returning: rendered)
             }

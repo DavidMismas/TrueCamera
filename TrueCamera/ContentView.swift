@@ -680,7 +680,7 @@ struct ContentView: View {
                         .pickerStyle(.segmented)
                     }
                     
-                    Toggle("Save JPG Copy", isOn: $cameraService.saveJPGToLibrary)
+                    Toggle("Save as JPG", isOn: $cameraService.saveJPGToLibrary)
                     if cameraService.saveJPGToLibrary {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("JPG Compression Quality: \(Int(cameraService.jpgCompressionQuality))")
@@ -692,7 +692,7 @@ struct ContentView: View {
                 } header: {
                     Text("Styled Export")
                 } footer: {
-                    Text("ProRAW source gives best quality. Processed source is faster. 10-bit HEIF keeps smoother gradients; 8-bit exports faster and smaller. JPG copies can be saved alongside.")
+                    Text("ProRAW source gives best quality. Processed source is faster. 10-bit HEIF keeps smoother gradients; 8-bit exports faster and smaller. You can choose to export as JPG instead of HEIF.")
                 }
 
                 if !cameraService.appleProRAWSupported {
@@ -1222,7 +1222,7 @@ struct ContentView: View {
                 settings: job.requestContext.effectSettings,
                 preferredHEIFBitDepth: job.requestContext.heifBitDepth,
                 preferredProcessingSource: job.requestContext.processingSource,
-                saveJPG: job.requestContext.saveJPGToLibrary,
+                saveAsJPG: job.requestContext.saveJPGToLibrary,
                 jpgQuality: job.requestContext.jpgCompressionQuality
             )
             let rawDataToSave = job.requestContext.saveRAWToLibrary ? job.rawData : nil
@@ -1257,7 +1257,7 @@ struct ContentView: View {
 
     private func saveToPhotoLibrary(
         rawData: Data?,
-        styledResource: (primary: (data: Data, uniformTypeIdentifier: String), jpgData: Data?)?
+        styledResource: (data: Data, uniformTypeIdentifier: String)?
     ) async -> (Bool, String?) {
         let authStatus = await ensurePhotoWriteAuthorization()
         guard authStatus == .authorized || authStatus == .limited else {
@@ -1278,24 +1278,14 @@ struct ContentView: View {
                 let request = PHAssetCreationRequest.forAsset()
                 if let styledResource {
                     let options = PHAssetResourceCreationOptions()
-                    options.uniformTypeIdentifier = normalizedOutputUTI(styledResource.primary.uniformTypeIdentifier)
-                    request.addResource(with: .photo, data: styledResource.primary.data, options: options)
+                    options.uniformTypeIdentifier = normalizedOutputUTI(styledResource.uniformTypeIdentifier)
+                    request.addResource(with: .photo, data: styledResource.data, options: options)
                 }
                 if let tempPhotoFileURL {
                     let options = PHAssetResourceCreationOptions()
                     options.shouldMoveFile = true
                     let rawResourceType: PHAssetResourceType = styledResource == nil ? .photo : .alternatePhoto
                     request.addResource(with: rawResourceType, fileURL: tempPhotoFileURL, options: options)
-                }
-                
-                if let jpgData = styledResource?.jpgData {
-                    // Avoid saving duplicate JPG if primary was already a JPG.
-                    if styledResource?.primary.uniformTypeIdentifier != "public.jpeg" || styledResource?.primary.data != jpgData {
-                        let jpgRequest = PHAssetCreationRequest.forAsset()
-                        let jpgOptions = PHAssetResourceCreationOptions()
-                        jpgOptions.uniformTypeIdentifier = "public.jpeg"
-                        jpgRequest.addResource(with: .photo, data: jpgData, options: jpgOptions)
-                    }
                 }
             }, completionHandler: { success, error in
                 if let error { print("Photos save error: \(error)") }

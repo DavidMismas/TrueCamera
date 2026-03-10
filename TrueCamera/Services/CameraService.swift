@@ -578,12 +578,12 @@ final class CameraService: NSObject, ObservableObject {
     func buildStyledPhotoData(
         rawData: Data?,
         processedData: Data?
-    ) async -> (primary: (data: Data, uniformTypeIdentifier: String), jpgData: Data?)? {
+    ) async -> (data: Data, uniformTypeIdentifier: String)? {
         guard rawData != nil || processedData != nil else { return nil }
         let settings = effectSettingsSnapshot()
         let exportBitDepth = styledHEIFBitDepth
         let processingSource = styledProcessingSource
-        let saveJPG = saveJPGToLibrary
+        let saveAsJPG = saveJPGToLibrary
         let jpgQuality = jpgCompressionQuality / 100.0
         return await buildStyledPhotoData(
             rawData: rawData,
@@ -591,7 +591,7 @@ final class CameraService: NSObject, ObservableObject {
             settings: settings,
             preferredHEIFBitDepth: exportBitDepth,
             preferredProcessingSource: processingSource,
-            saveJPG: saveJPG,
+            saveAsJPG: saveAsJPG,
             jpgQuality: jpgQuality
         )
     }
@@ -602,9 +602,9 @@ final class CameraService: NSObject, ObservableObject {
         settings: PhotoEffectSettings,
         preferredHEIFBitDepth: StyledHEIFBitDepth,
         preferredProcessingSource: StyledProcessingSource,
-        saveJPG: Bool,
+        saveAsJPG: Bool,
         jpgQuality: Double
-    ) async -> (primary: (data: Data, uniformTypeIdentifier: String), jpgData: Data?)? {
+    ) async -> (data: Data, uniformTypeIdentifier: String)? {
         guard rawData != nil || processedData != nil else { return nil }
         return await withCheckedContinuation { continuation in
             exportQueue.async { [weak self] in
@@ -618,7 +618,7 @@ final class CameraService: NSObject, ObservableObject {
                     settings: settings,
                     preferredHEIFBitDepth: preferredHEIFBitDepth,
                     preferredProcessingSource: preferredProcessingSource,
-                    saveJPG: saveJPG,
+                    saveAsJPG: saveAsJPG,
                     jpgQuality: jpgQuality
                 )
                 continuation.resume(returning: rendered)

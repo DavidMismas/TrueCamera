@@ -1,3 +1,4 @@
+import CoreImage
 import Photos
 import SwiftUI
 import UniformTypeIdentifiers
@@ -65,6 +66,7 @@ struct ContentView: View {
     private struct CaptureRequestContext {
         let effectSettings: PhotoEffectSettings
         let heifBitDepth: StyledHEIFBitDepth
+        let heifCompressionQuality: Double
         let processingSource: StyledProcessingSource
         let saveRAWToLibrary: Bool
     }
@@ -76,25 +78,12 @@ struct ContentView: View {
         let requestContext: CaptureRequestContext
     }
 
-    private static let editorReferenceImage: UIImage? = {
-        for name in ["Image", "image", "bird"] {
-            if let image = UIImage(named: name) {
-                return image
-            }
-        }
-
-        for (name, ext) in [("image", "jpg"), ("Image", "jpg"), ("bird", "jpg")] {
-            if let url = Bundle.main.url(forResource: name, withExtension: ext),
-               let image = UIImage(contentsOfFile: url.path) {
-                return image
-            }
-        }
-
-        return nil
-    }()
+    private static let editorReferenceImage: UIImage? = loadEditorReferenceImage()
     nonisolated private static let referencePreviewProcessor = PhotoEffectsProcessor()
-    nonisolated private static let referenceRenderDebounceNanoseconds: UInt64 = 120_000_000
+    nonisolated private static let referenceRenderDebounceNanoseconds: UInt64 = 16_000_000
     private static let queueFullStatusMessage = "Processing queue is full. Please wait a moment."
+    private static let editorReferenceMaxDimension: CGFloat = 2200
+    nonisolated private static let referencePreviewRenderDimension: CGFloat = 960
 
     @StateObject private var cameraService = CameraService()
     @Environment(\.scenePhase) private var scenePhase
@@ -343,22 +332,40 @@ struct ContentView: View {
     }
 
     private var presetStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                presetIcon(title: "Original", symbol: "camera", isSelected: cameraService.selectedEffectPresetID == PhotoEffectLibrary.customPresetID) {
-                    cameraService.resetEffectsToNeutral()
-                }
-                ForEach(cameraService.effectPresets) { preset in
-                    presetIcon(
-                        title: shortPresetTitle(preset.name),
-                        symbol: "camera.filters",
-                        isSelected: cameraService.selectedEffectPresetID == preset.id
-                    ) {
-                        cameraService.applyEffectPreset(preset)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    presetIcon(title: "Original", symbol: "camera", isSelected: cameraService.selectedEffectPresetID == PhotoEffectLibrary.customPresetID) {
+                        cameraService.resetEffectsToNeutral()
+                    }
+                    .id(presetScrollTargetID(for: PhotoEffectLibrary.customPresetID))
+
+                    ForEach(cameraService.effectPresets) { preset in
+                        presetIcon(
+                            title: shortPresetTitle(preset.name),
+                            symbol: "camera.filters",
+                            isSelected: cameraService.selectedEffectPresetID == preset.id
+                        ) {
+                            cameraService.applyEffectPreset(preset)
+                        }
+                        .id(presetScrollTargetID(for: preset.id))
                     }
                 }
+                .padding(.horizontal, 14)
             }
-            .padding(.horizontal, 14)
+            .onAppear {
+                DispatchQueue.main.async {
+                    scrollPresetStrip(to: proxy, animated: false)
+                }
+            }
+            .onChange(of: cameraService.selectedEffectPresetID) { _, _ in
+                scrollPresetStrip(to: proxy, animated: true)
+            }
+            .onChange(of: cameraService.effectPresets.map(\.id)) { _, _ in
+                DispatchQueue.main.async {
+                    scrollPresetStrip(to: proxy, animated: false)
+                }
+            }
         }
     }
 
@@ -462,6 +469,7 @@ struct ContentView: View {
             pendingCaptureRequestContext = CaptureRequestContext(
                 effectSettings: cameraService.effectSettingsSnapshot(),
                 heifBitDepth: cameraService.styledHEIFBitDepth,
+                heifCompressionQuality: cameraService.styledHEIFCompressionQuality,
                 processingSource: cameraService.styledProcessingSource,
                 saveRAWToLibrary: cameraService.saveRAWToLibrary
             )
@@ -646,11 +654,11 @@ struct ContentView: View {
                         .pickerStyle(.segmented)
                     }
 
-                    Toggle("Save RAW (.dng) to Photos", isOn: $cameraService.saveRAWToLibrary)
+                    Toggle("Save Original RAW (.dng) Separately", isOn: $cameraService.saveRAWToLibrary)
                 } header: {
                     Text("Capture")
                 } footer: {
-                    Text("Balanced is typically faster; Quality may improve low-light/detail at the cost of longer processing time. Lower max resolution can reduce capture and post-processing time.")
+                    Text("Balanced is typically faster; Quality may improve low-light/detail at the cost of longer processing time. Lower max resolution can reduce capture and post-processing time. When RAW save is enabled, the original DNG is stored as a separate asset.")
                 }
 
                 Section {
@@ -675,10 +683,40 @@ struct ContentView: View {
                         }
                         .pickerStyle(.segmented)
                     }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("HEIF Compression")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text("\(Int((cameraService.styledHEIFCompressionQuality * 100).rounded()))%")
+                                .font(.caption.monospacedDigit().weight(.semibold))
+                                .foregroundStyle(themeTextSecondary)
+                        }
+
+                        ThemedSlider(
+                            value: heifCompressionPercentBinding,
+                            range: StyledHEIFExportDefaults.compressionQualityRange.lowerBound * 100...StyledHEIFExportDefaults.compressionQualityRange.upperBound * 100,
+                            minimumTrackColor: themeTeal,
+                            maximumTrackColor: themePink.opacity(0.22),
+                            thumbColor: themePink
+                        )
+                        .frame(height: 28)
+
+                        HStack {
+                            Text("85%")
+                                .font(.caption2.monospacedDigit().weight(.semibold))
+                                .foregroundStyle(themeTextSecondary.opacity(0.8))
+                            Spacer()
+                            Text("100%")
+                                .font(.caption2.monospacedDigit().weight(.semibold))
+                                .foregroundStyle(themeTextSecondary.opacity(0.8))
+                        }
+                    }
                 } header: {
                     Text("Styled Export")
                 } footer: {
-                    Text("ProRAW source gives best quality. Processed source is faster. 10-bit HEIF keeps smoother gradients; 8-bit exports faster and smaller.")
+                    Text("ProRAW source gives best quality. Processed source is faster. 10-bit HEIF keeps smoother gradients; 8-bit exports faster and smaller. Compression 100 keeps the largest files; 85 reduces size noticeably while keeping 48 MP.")
                 }
 
                 if !cameraService.appleProRAWSupported {
@@ -693,7 +731,7 @@ struct ContentView: View {
                     Text("Capture uses Apple ProRAW at \(cameraService.resolutionCap.label) resolution.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Text("RAW .dng is stored only when enabled above.")
+                    Text("RAW .dng is stored as a separate original asset when enabled above.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
@@ -1006,7 +1044,7 @@ struct ContentView: View {
                 VStack(spacing: 8) {
                     Image(systemName: "photo")
                         .font(.title3.weight(.semibold))
-                    Text("Missing image.jpg reference image")
+                    Text("Missing reference image")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -1038,7 +1076,7 @@ struct ContentView: View {
             let rendered = Self.referencePreviewProcessor.renderReferencePreview(
                 from: sourceImage,
                 settings: settings,
-                maxDimension: 220,
+                maxDimension: Self.referencePreviewRenderDimension,
                 includeGrain: false
             )
             guard !Task.isCancelled else { return }
@@ -1095,6 +1133,15 @@ struct ContentView: View {
         )
     }
 
+    private var heifCompressionPercentBinding: Binding<Double> {
+        Binding(
+            get: { cameraService.styledHEIFCompressionQuality * 100 },
+            set: { nextValue in
+                cameraService.styledHEIFCompressionQuality = nextValue.rounded() / 100
+            }
+        )
+    }
+
     private func effectSlider(
         title: String,
         value: Binding<Double>,
@@ -1106,17 +1153,42 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(themePink.opacity(0.92))
                 Spacer()
                 Text(value.wrappedValue, format: .number.precision(.fractionLength(decimals)))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(themeTextSecondary)
             }
-            Slider(value: value, in: range)
-                .tint(sliderTint)
+            ThemedSlider(
+                value: value,
+                range: range,
+                minimumTrackColor: sliderTint,
+                maximumTrackColor: themePink.opacity(0.22),
+                thumbColor: themePink
+            )
+                .frame(height: 28)
                 .contentShape(Rectangle())
                 .padding(.vertical, 2)
         }
         .padding(.vertical, 2)
+    }
+
+    private func presetScrollTargetID(for presetID: String) -> String {
+        "main-preset-\(presetID)"
+    }
+
+    private func scrollPresetStrip(to proxy: ScrollViewProxy, animated: Bool) {
+        let action = {
+            proxy.scrollTo(presetScrollTargetID(for: cameraService.selectedEffectPresetID), anchor: .center)
+        }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                action()
+            }
+        } else {
+            action()
+        }
     }
 
     private func gradeTintColor(hue: Double) -> Color {
@@ -1167,6 +1239,7 @@ struct ContentView: View {
         CaptureRequestContext(
             effectSettings: cameraService.effectSettingsSnapshot(),
             heifBitDepth: cameraService.styledHEIFBitDepth,
+            heifCompressionQuality: cameraService.styledHEIFCompressionQuality,
             processingSource: cameraService.styledProcessingSource,
             saveRAWToLibrary: cameraService.saveRAWToLibrary
         )
@@ -1205,6 +1278,7 @@ struct ContentView: View {
                 processedData: job.processedData,
                 settings: job.requestContext.effectSettings,
                 preferredHEIFBitDepth: job.requestContext.heifBitDepth,
+                preferredHEIFCompressionQuality: job.requestContext.heifCompressionQuality,
                 preferredProcessingSource: job.requestContext.processingSource
             )
             let rawDataToSave = job.requestContext.saveRAWToLibrary ? job.rawData : nil
@@ -1257,17 +1331,20 @@ struct ContentView: View {
 
         return await withCheckedContinuation { continuation in
             PHPhotoLibrary.shared().performChanges({
-                let request = PHAssetCreationRequest.forAsset()
+                let creationDate = Date()
                 if let styledResource {
+                    let request = PHAssetCreationRequest.forAsset()
+                    request.creationDate = creationDate
                     let options = PHAssetResourceCreationOptions()
                     options.uniformTypeIdentifier = normalizedOutputUTI(styledResource.uniformTypeIdentifier)
                     request.addResource(with: .photo, data: styledResource.data, options: options)
                 }
                 if let tempPhotoFileURL {
+                    let request = PHAssetCreationRequest.forAsset()
+                    request.creationDate = creationDate
                     let options = PHAssetResourceCreationOptions()
                     options.shouldMoveFile = true
-                    let rawResourceType: PHAssetResourceType = styledResource == nil ? .photo : .alternatePhoto
-                    request.addResource(with: rawResourceType, fileURL: tempPhotoFileURL, options: options)
+                    request.addResource(with: .photo, fileURL: tempPhotoFileURL, options: options)
                 }
             }, completionHandler: { success, error in
                 if let error { print("Photos save error: \(error)") }
@@ -1507,6 +1584,64 @@ struct ContentView: View {
         Task { _ = await ensurePhotoWriteAuthorization() }
     }
 
+    private static func loadEditorReferenceImage() -> UIImage? {
+        for name in ["Image", "image", "bird"] {
+            if let image = UIImage(named: name) {
+                return image
+            }
+        }
+
+        let bundledCandidates = [
+            ("image", "DNG"),
+            ("image", "dng"),
+            ("Image", "DNG"),
+            ("Image", "dng"),
+            ("image", "jpg"),
+            ("Image", "jpg"),
+            ("bird", "jpg")
+        ]
+
+        for (name, ext) in bundledCandidates {
+            guard let url = Bundle.main.url(forResource: name, withExtension: ext) else { continue }
+            if let image = loadEditorReferenceImage(from: url) {
+                return image
+            }
+        }
+
+        return nil
+    }
+
+    private static func loadEditorReferenceImage(from url: URL) -> UIImage? {
+        if url.pathExtension.lowercased() == "dng" {
+            return loadRawEditorReferenceImage(from: url)
+        }
+        return UIImage(contentsOfFile: url.path)
+    }
+
+    private static func loadRawEditorReferenceImage(from url: URL) -> UIImage? {
+        let rawOptions: [CIRAWFilterOption: Any] = [.allowDraftMode: false]
+        let input = (CIFilter(imageURL: url, options: rawOptions) as? CIRAWFilter)?.outputImage
+            ?? CIImage(contentsOf: url, options: [.applyOrientationProperty: true])
+        guard let input else { return nil }
+
+        let extent = input.extent.integral
+        guard extent.width > 0, extent.height > 0 else { return nil }
+
+        let scale = min(1, editorReferenceMaxDimension / max(extent.width, extent.height))
+        let output = scale < 1
+            ? input.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            : input
+
+        let colorSpace = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+        let context = CIContext(options: [
+            .cacheIntermediates: false,
+            .workingColorSpace: colorSpace,
+            .outputColorSpace: colorSpace
+        ])
+        guard let cgImage = context.createCGImage(output, from: output.extent.integral) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+
     // MARK: - Orientation
 
     private func setInitialControlRotation() {
@@ -1542,6 +1677,50 @@ struct ContentView: View {
             return nil
         }
         return scene.effectiveGeometry.interfaceOrientation
+    }
+}
+
+private struct ThemedSlider: UIViewRepresentable {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let minimumTrackColor: Color
+    let maximumTrackColor: Color
+    let thumbColor: Color
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value)
+    }
+
+    func makeUIView(context: Context) -> UISlider {
+        let slider = UISlider(frame: .zero)
+        slider.isContinuous = true
+        slider.addTarget(context.coordinator, action: #selector(Coordinator.valueChanged(_:)), for: .valueChanged)
+        return slider
+    }
+
+    func updateUIView(_ uiView: UISlider, context: Context) {
+        uiView.minimumValue = Float(range.lowerBound)
+        uiView.maximumValue = Float(range.upperBound)
+        uiView.minimumTrackTintColor = UIColor(minimumTrackColor)
+        uiView.maximumTrackTintColor = UIColor(maximumTrackColor)
+        uiView.thumbTintColor = UIColor(thumbColor)
+
+        let currentValue = Float(value)
+        if abs(uiView.value - currentValue) > 0.0001 {
+            uiView.value = currentValue
+        }
+    }
+
+    final class Coordinator: NSObject {
+        @Binding private var value: Double
+
+        init(value: Binding<Double>) {
+            _value = value
+        }
+
+        @objc func valueChanged(_ sender: UISlider) {
+            value = Double(sender.value)
+        }
     }
 }
 

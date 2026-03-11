@@ -77,6 +77,10 @@ nonisolated enum StyledProcessingSource: String, CaseIterable, Identifiable, Sen
     }
 }
 
+nonisolated enum StyledHEIFExportDefaults {
+    static let compressionQualityRange: ClosedRange<Double> = 0.85...1.0
+}
+
 nonisolated enum PhotoCapturePriority: String, CaseIterable, Identifiable, Sendable {
     case balanced = "balanced"
     case quality = "quality"
@@ -152,6 +156,7 @@ final class CameraService: NSObject, ObservableObject {
         static let capturePriority = "camera.capturePriority"
         static let resolutionCap = "camera.resolutionCap"
         static let styledHEIFBitDepth = "camera.styledHEIFBitDepth"
+        static let styledHEIFCompressionQuality = "camera.styledHEIFCompressionQuality"
         static let styledProcessingSource = "camera.styledProcessingSource"
         static let saveRAWToLibrary = "camera.saveRAWToLibrary"
         static let selectedEffectPresetID = "camera.selectedEffectPresetID"
@@ -207,6 +212,16 @@ final class CameraService: NSObject, ObservableObject {
     }
     @Published var styledHEIFBitDepth: StyledHEIFBitDepth {
         didSet { UserDefaults.standard.set(styledHEIFBitDepth.rawValue, forKey: PreferenceKey.styledHEIFBitDepth) }
+    }
+    @Published var styledHEIFCompressionQuality: Double {
+        didSet {
+            let normalized = Self.clampedStyledHEIFCompressionQuality(styledHEIFCompressionQuality)
+            if abs(normalized - styledHEIFCompressionQuality) > 0.0001 {
+                styledHEIFCompressionQuality = normalized
+                return
+            }
+            UserDefaults.standard.set(normalized, forKey: PreferenceKey.styledHEIFCompressionQuality)
+        }
     }
     @Published var styledProcessingSource: StyledProcessingSource {
         didSet { UserDefaults.standard.set(styledProcessingSource.rawValue, forKey: PreferenceKey.styledProcessingSource) }
@@ -335,6 +350,8 @@ final class CameraService: NSObject, ObservableObject {
         self.resolutionCap = PhotoResolutionCap(rawValue: storedResolutionCapRaw ?? "") ?? .full
         let storedBitDepthRaw = UserDefaults.standard.string(forKey: PreferenceKey.styledHEIFBitDepth)
         self.styledHEIFBitDepth = StyledHEIFBitDepth(rawValue: storedBitDepthRaw ?? "") ?? .tenBit
+        let storedCompressionQuality = UserDefaults.standard.object(forKey: PreferenceKey.styledHEIFCompressionQuality) as? Double ?? 1.0
+        self.styledHEIFCompressionQuality = Self.clampedStyledHEIFCompressionQuality(storedCompressionQuality)
         let storedProcessingSourceRaw = UserDefaults.standard.string(forKey: PreferenceKey.styledProcessingSource)
         self.styledProcessingSource = StyledProcessingSource(rawValue: storedProcessingSourceRaw ?? "") ?? .proRAW
         self.saveRAWToLibrary = UserDefaults.standard.object(forKey: PreferenceKey.saveRAWToLibrary) as? Bool ?? false
@@ -572,12 +589,14 @@ final class CameraService: NSObject, ObservableObject {
         guard rawData != nil || processedData != nil else { return nil }
         let settings = effectSettingsSnapshot()
         let exportBitDepth = styledHEIFBitDepth
+        let exportCompressionQuality = styledHEIFCompressionQuality
         let processingSource = styledProcessingSource
         return await buildStyledPhotoData(
             rawData: rawData,
             processedData: processedData,
             settings: settings,
             preferredHEIFBitDepth: exportBitDepth,
+            preferredHEIFCompressionQuality: exportCompressionQuality,
             preferredProcessingSource: processingSource
         )
     }
@@ -587,6 +606,7 @@ final class CameraService: NSObject, ObservableObject {
         processedData: Data?,
         settings: PhotoEffectSettings,
         preferredHEIFBitDepth: StyledHEIFBitDepth,
+        preferredHEIFCompressionQuality: Double,
         preferredProcessingSource: StyledProcessingSource
     ) async -> (data: Data, uniformTypeIdentifier: String)? {
         guard rawData != nil || processedData != nil else { return nil }
@@ -601,11 +621,16 @@ final class CameraService: NSObject, ObservableObject {
                     processedData: processedData,
                     settings: settings,
                     preferredHEIFBitDepth: preferredHEIFBitDepth,
+                    preferredHEIFCompressionQuality: preferredHEIFCompressionQuality,
                     preferredProcessingSource: preferredProcessingSource
                 )
                 continuation.resume(returning: rendered)
             }
         }
+    }
+
+    private static func clampedStyledHEIFCompressionQuality(_ value: Double) -> Double {
+        min(max(value, StyledHEIFExportDefaults.compressionQualityRange.lowerBound), StyledHEIFExportDefaults.compressionQualityRange.upperBound)
     }
 
     private func defaultLens(from lenses: [CameraLens]) -> CameraLens? {

@@ -86,6 +86,7 @@ final class PhotoEffectsProcessor {
         processedData: Data?,
         settings: PhotoEffectSettings,
         preferredHEIFBitDepth: StyledHEIFBitDepth = .tenBit,
+        preferredHEIFCompressionQuality: Double = 1.0,
         preferredProcessingSource: StyledProcessingSource = .proRAW
     ) -> (data: Data, uniformTypeIdentifier: String)? {
         if shouldBypassNeutralProcessing(settings),
@@ -112,8 +113,9 @@ final class PhotoEffectsProcessor {
             graded = addGrain(to: graded, amount: settings.grainAmount, size: settings.grainSize)
         }
         
+        let compressionQuality = min(max(preferredHEIFCompressionQuality, StyledHEIFExportDefaults.compressionQualityRange.lowerBound), StyledHEIFExportDefaults.compressionQualityRange.upperBound)
         let options: [CIImageRepresentationOption: Any] = [
-            kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 1.0,
+            kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: compressionQuality,
             kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true,
         ]
         if preferredHEIFBitDepth == .tenBit,

@@ -4,6 +4,7 @@ import CoreVideo
 import ImageIO
 import UIKit
 import simd
+import CoreGraphics
 
 nonisolated private struct ColorCubeKey: Hashable {
     let hsl: HSLAdjustments
@@ -85,29 +86,13 @@ final class PhotoEffectsProcessor {
         processedData: Data?,
         settings: PhotoEffectSettings,
         preferredHEIFBitDepth: StyledHEIFBitDepth = .tenBit,
-        preferredProcessingSource: StyledProcessingSource = .proRAW,
-        saveAsJPG: Bool = false,
-        jpgQuality: Double = 0.85
+        preferredProcessingSource: StyledProcessingSource = .proRAW
     ) -> (data: Data, uniformTypeIdentifier: String)? {
         if shouldBypassNeutralProcessing(settings),
            let processedData,
            let passthroughUTI = detectedPassthroughUTI(for: processedData) {
             
-            if saveAsJPG {
-                if passthroughUTI == "public.jpeg" {
-                    return (data: processedData, uniformTypeIdentifier: passthroughUTI)
-                } else if let image = CIImage(data: processedData) {
-                    let options: [CIImageRepresentationOption: Any] = [
-                        kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: jpgQuality,
-                        kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true
-                    ]
-                    if let jpeg = exportContext.jpegRepresentation(of: image, colorSpace: exportColorSpace, options: options) {
-                        return (data: jpeg, uniformTypeIdentifier: "public.jpeg")
-                    }
-                }
-            } else {
-                return (data: processedData, uniformTypeIdentifier: passthroughUTI)
-            }
+            return (data: processedData, uniformTypeIdentifier: passthroughUTI)
         }
 
         guard let input = makeExportInputImage(
@@ -126,30 +111,21 @@ final class PhotoEffectsProcessor {
         if settings.grainAmount > 0.0001 {
             graded = addGrain(to: graded, amount: settings.grainAmount, size: settings.grainSize)
         }
-        if saveAsJPG {
-            let options: [CIImageRepresentationOption: Any] = [
-                kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: jpgQuality,
-                kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true,
-            ]
-            if let jpeg = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: options) {
-                return (data: jpeg, uniformTypeIdentifier: "public.jpeg")
-            }
-        } else {
-            let options: [CIImageRepresentationOption: Any] = [
-                kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 1.0,
-                kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true,
-            ]
-            if preferredHEIFBitDepth == .tenBit,
-               #available(iOS 15.0, *),
-               let heif10 = try? exportContext.heif10Representation(of: graded, colorSpace: exportColorSpace, options: options) {
-                return (data: heif10, uniformTypeIdentifier: "public.heic")
-            }
-            if let heif = exportContext.heifRepresentation(of: graded, format: .RGBA8, colorSpace: exportColorSpace, options: options) {
-                return (data: heif, uniformTypeIdentifier: "public.heic")
-            }
-            if let jpeg = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: options) {
-                return (data: jpeg, uniformTypeIdentifier: "public.jpeg")
-            }
+        
+        let options: [CIImageRepresentationOption: Any] = [
+            kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 1.0,
+            kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true,
+        ]
+        if preferredHEIFBitDepth == .tenBit,
+           #available(iOS 15.0, *),
+           let heif10 = try? exportContext.heif10Representation(of: graded, colorSpace: exportColorSpace, options: options) {
+            return (data: heif10, uniformTypeIdentifier: "public.heic")
+        }
+        if let heif = exportContext.heifRepresentation(of: graded, format: .RGBA8, colorSpace: exportColorSpace, options: options) {
+            return (data: heif, uniformTypeIdentifier: "public.heic")
+        }
+        if let jpeg = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: options) {
+            return (data: jpeg, uniformTypeIdentifier: "public.jpeg")
         }
         
         return nil

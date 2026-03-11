@@ -67,8 +67,6 @@ struct ContentView: View {
         let heifBitDepth: StyledHEIFBitDepth
         let processingSource: StyledProcessingSource
         let saveRAWToLibrary: Bool
-        let saveJPGToLibrary: Bool
-        let jpgCompressionQuality: Double
     }
 
     private struct PendingCaptureJob: Identifiable {
@@ -465,9 +463,7 @@ struct ContentView: View {
                 effectSettings: cameraService.effectSettingsSnapshot(),
                 heifBitDepth: cameraService.styledHEIFBitDepth,
                 processingSource: cameraService.styledProcessingSource,
-                saveRAWToLibrary: cameraService.saveRAWToLibrary,
-                saveJPGToLibrary: cameraService.saveJPGToLibrary,
-                jpgCompressionQuality: cameraService.jpgCompressionQuality
+                saveRAWToLibrary: cameraService.saveRAWToLibrary
             )
             lastCaptureSucceeded = false
             startCaptureProcessingUI()
@@ -679,20 +675,10 @@ struct ContentView: View {
                         }
                         .pickerStyle(.segmented)
                     }
-                    
-                    Toggle("Save as JPG", isOn: $cameraService.saveJPGToLibrary)
-                    if cameraService.saveJPGToLibrary {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("JPG Compression Quality: \(Int(cameraService.jpgCompressionQuality))")
-                                .font(.subheadline)
-                            Slider(value: $cameraService.jpgCompressionQuality, in: 70...100, step: 1)
-                                .tint(themeTeal)
-                        }
-                    }
                 } header: {
                     Text("Styled Export")
                 } footer: {
-                    Text("ProRAW source gives best quality. Processed source is faster. 10-bit HEIF keeps smoother gradients; 8-bit exports faster and smaller. You can choose to export as JPG instead of HEIF.")
+                    Text("ProRAW source gives best quality. Processed source is faster. 10-bit HEIF keeps smoother gradients; 8-bit exports faster and smaller.")
                 }
 
                 if !cameraService.appleProRAWSupported {
@@ -1182,9 +1168,7 @@ struct ContentView: View {
             effectSettings: cameraService.effectSettingsSnapshot(),
             heifBitDepth: cameraService.styledHEIFBitDepth,
             processingSource: cameraService.styledProcessingSource,
-            saveRAWToLibrary: cameraService.saveRAWToLibrary,
-            saveJPGToLibrary: cameraService.saveJPGToLibrary,
-            jpgCompressionQuality: cameraService.jpgCompressionQuality
+            saveRAWToLibrary: cameraService.saveRAWToLibrary
         )
     }
 
@@ -1221,9 +1205,7 @@ struct ContentView: View {
                 processedData: job.processedData,
                 settings: job.requestContext.effectSettings,
                 preferredHEIFBitDepth: job.requestContext.heifBitDepth,
-                preferredProcessingSource: job.requestContext.processingSource,
-                saveAsJPG: job.requestContext.saveJPGToLibrary,
-                jpgQuality: job.requestContext.jpgCompressionQuality
+                preferredProcessingSource: job.requestContext.processingSource
             )
             let rawDataToSave = job.requestContext.saveRAWToLibrary ? job.rawData : nil
             let (saveOk, saveErrorMessage) = await saveToPhotoLibrary(rawData: rawDataToSave, styledResource: styledResource)

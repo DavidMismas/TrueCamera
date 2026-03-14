@@ -146,7 +146,7 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     static let grainSizeRange: ClosedRange<Double> = 0.6...2.2
 
     static let hslHueRange: ClosedRange<Double> = -35...35
-    static let hslSaturationRange: ClosedRange<Double> = -0.5...0.5
+    static let hslSaturationRange: ClosedRange<Double> = -1.0...1.0
     static let hslLightnessRange: ClosedRange<Double> = -0.35...0.35
     static let colorGradeHueRange: ClosedRange<Double> = -180...180
     static let colorGradeAmountRange: ClosedRange<Double> = 0...1

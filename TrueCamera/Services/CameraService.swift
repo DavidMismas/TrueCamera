@@ -527,6 +527,10 @@ final class CameraService: NSObject, ObservableObject {
         effectSettings = .neutral
     }
 
+    func resetCurrentEffectAdjustments() {
+        effectSettings = .neutral
+    }
+
     func updateEffectSetting(_ update: (inout PhotoEffectSettings) -> Void) {
         var next = effectSettings
         update(&next)

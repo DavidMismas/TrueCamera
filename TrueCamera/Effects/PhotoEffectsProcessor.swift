@@ -314,10 +314,14 @@ final class PhotoEffectsProcessor {
             }
         }
 
-        if abs(settings.contrast) > 0.0001 || abs(settings.saturation) > 0.0001 {
+        if abs(settings.contrast) > 0.0001 {
+            output = applyPerceptualContrast(settings.contrast, to: output)
+        }
+
+        if abs(settings.saturation) > 0.0001 {
             let controls = CIFilter.colorControls()
             controls.inputImage = output
-            controls.contrast = Float(max(0.01, 1.0 + (settings.contrast / 100.0)))
+            controls.contrast = 1.0
             controls.saturation = Float(max(0, 1.0 + settings.saturation))
             if let processed = controls.outputImage {
                 output = processed
@@ -396,7 +400,6 @@ final class PhotoEffectsProcessor {
         abs(settings.baseExposure) > 0.0001 ||
             abs(settings.highlights) > 0.0001 ||
             abs(settings.shadows) > 0.0001 ||
-            abs(settings.contrast) > 0.0001 ||
             abs(settings.saturation) > 0.0001 ||
             abs(settings.vibrance) > 0.0001 ||
             abs(settings.warmth) > 0.5 ||
@@ -430,6 +433,38 @@ final class PhotoEffectsProcessor {
         highlightShadow.shadowAmount = 0.03
         highlightShadow.highlightAmount = 0.985
         return highlightShadow.outputImage?.cropped(to: image.extent) ?? output
+    }
+
+    nonisolated private func applyPerceptualContrast(_ value: Double, to image: CIImage) -> CIImage {
+        let amount = Float(max(0.01, 1.0 + ((value * 1.4) / 100.0)))
+        var output = image
+
+        // Apply contrast in perceptual sRGB so it behaves like a normal contrast control,
+        // then return to the linear working pipeline.
+        if let toSRGB = CIFilter(name: "CILinearToSRGBToneCurve") {
+            toSRGB.setValue(output, forKey: kCIInputImageKey)
+            if let converted = toSRGB.outputImage {
+                output = converted
+            }
+        }
+
+        let controls = CIFilter.colorControls()
+        controls.inputImage = output
+        controls.contrast = amount
+        controls.saturation = 1.0
+        controls.brightness = 0
+        if let contrasted = controls.outputImage {
+            output = contrasted
+        }
+
+        if let toLinear = CIFilter(name: "CISRGBToneCurveToLinear") {
+            toLinear.setValue(output, forKey: kCIInputImageKey)
+            if let converted = toLinear.outputImage {
+                output = converted
+            }
+        }
+
+        return output.cropped(to: image.extent)
     }
 
     nonisolated private func shouldApplyColorCube(for settings: PhotoEffectSettings) -> Bool {
@@ -524,6 +559,7 @@ final class PhotoEffectsProcessor {
         var satDeltaSum = 0.0
         var lightDeltaSum = 0.0
         var weightSum = 0.0
+        var strongestNegativeSaturation = 0.0
 
         for band in HSLColorBand.allCases {
             let adjustment = hsl[band]
@@ -533,11 +569,14 @@ final class PhotoEffectsProcessor {
             satDeltaSum += adjustment.saturationDelta * weight
             lightDeltaSum += adjustment.lightnessDelta * weight
             weightSum += weight
+            strongestNegativeSaturation = min(strongestNegativeSaturation, adjustment.saturationDelta)
         }
 
+        var saturationDelta = 0.0
         if weightSum > 0 {
+            saturationDelta = satDeltaSum / weightSum
             hue += hueShiftSum / weightSum
-            saturation *= (1 + (satDeltaSum / weightSum))
+            saturation *= (1 + saturationDelta)
             lightness += (lightDeltaSum / weightSum)
         }
 
@@ -551,7 +590,10 @@ final class PhotoEffectsProcessor {
         let shadowGuard = smoothstep(0.04, 0.14, lightness)
         let highlightGuard = 1 - smoothstep(0.90, 0.98, lightness)
         let protection = chromaWeight * shadowGuard * highlightGuard
-        return mix(original, adjusted, t: protection)
+
+        let negativeSaturationStrength = clamp(max(-saturationDelta, -strongestNegativeSaturation), 0, 1)
+        let saturationMix = max(protection, negativeSaturationStrength)
+        return mix(original, adjusted, t: saturationMix)
     }
 
     nonisolated private func shouldApplyShadowChromaStabilization(

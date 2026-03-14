@@ -1015,7 +1015,7 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Reset") {
-                        cameraService.resetEffectsToNeutral()
+                        cameraService.resetCurrentEffectAdjustments()
                         scheduleReferenceRender()
                     }
                     .foregroundStyle(themePink)

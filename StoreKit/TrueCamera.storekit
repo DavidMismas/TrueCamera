@@ -8,13 +8,13 @@
       "internalID" : "49E33209-6226-4B83-B567-1F540EAF1001",
       "localizations" : [
         {
-          "description" : "One-time purchase that unlocks full-resolution capture and unlimited presets in TrueCamera.",
-          "displayName" : "TrueCamera Pro",
+          "description" : "One-time purchase that unlocks full-resolution capture and unlimited presets in Grejn.",
+          "displayName" : "Grejn Pro",
           "locale" : "en_US"
         }
       ],
       "productID" : "com.david.TrueCamera.pro.lifetime",
-      "referenceName" : "TrueCamera Pro",
+      "referenceName" : "Grejn Pro",
       "type" : "NonConsumable"
     }
   ],

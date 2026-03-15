@@ -622,7 +622,7 @@ struct ContentView: View {
             Text("Camera access is disabled.")
                 .font(.headline)
                 .foregroundStyle(themeTextPrimary)
-            Text("Enable camera in iOS Settings for TrueCamera.")
+                Text("Enable camera in iOS Settings for Grejn.")
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(themeTextSecondary)
@@ -650,13 +650,13 @@ struct ContentView: View {
             Form {
                 Section {
                     if premiumManager.hasPremiumAccess {
-                        Label("TrueCamera Pro unlocked", systemImage: "checkmark.seal.fill")
+                        Label("Grejn Pro unlocked", systemImage: "checkmark.seal.fill")
                             .foregroundStyle(themeTeal)
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Unlock full-resolution Apple ProRAW capture and unlimited saved presets.")
                                 .font(.subheadline)
-                            Button("Unlock TrueCamera Pro") {
+                            Button("Unlock Grejn Pro") {
                                 premiumManager.presentPaywall(for: .all)
                             }
                             .buttonStyle(.borderedProminent)
@@ -664,7 +664,7 @@ struct ContentView: View {
                         }
                     }
                 } header: {
-                    Text("TrueCamera Pro")
+                    Text("Grejn Pro")
                 }
 
                 Section("Sound & Haptics") {
@@ -708,7 +708,7 @@ struct ContentView: View {
                                 Image(systemName: "lock.fill")
                                     .foregroundStyle(themePink.opacity(0.9))
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Full resolution is part of TrueCamera Pro.")
+                                    Text("Full resolution is part of Grejn Pro.")
                                         .font(.footnote.weight(.semibold))
                                     Text("Free mode uses 12 MP. Upgrade to unlock the full-resolution option.")
                                         .font(.footnote)
@@ -900,7 +900,7 @@ struct ContentView: View {
                         }
 
                         if hasReachedFreePresetLimit {
-                            Text("Free mode includes 1 saved preset. Upgrade to TrueCamera Pro for unlimited presets.")
+                            Text("Free mode includes 1 saved preset. Upgrade to Grejn Pro for unlimited presets.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }

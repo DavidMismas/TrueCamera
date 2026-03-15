@@ -17,7 +17,7 @@ struct PremiumPaywallView: View {
                 }
                 .padding()
             }
-            .navigationTitle("TrueCamera Pro")
+            .navigationTitle("Grejn Pro")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -49,7 +49,7 @@ struct PremiumPaywallView: View {
                 .font(.headline)
 
             if premiumManager.hasPremiumAccess {
-                Text("TrueCamera Pro is already unlocked on this device.")
+                Text("Grejn Pro is already unlocked on this device.")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.green)
             } else {

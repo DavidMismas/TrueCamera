@@ -12,7 +12,7 @@ final class PremiumManager: ObservableObject {
         var title: String {
             switch self {
             case .all:
-                return "TrueCamera Pro"
+                return "Grejn Pro"
             case .fullResolution:
                 return "Unlock Full Resolution"
             case .unlimitedPresets:
@@ -23,7 +23,7 @@ final class PremiumManager: ObservableObject {
         var subtitle: String {
             switch self {
             case .all:
-                return "Unlock the complete Pro workflow for TrueCamera."
+                return "Unlock the complete Pro workflow for Grejn."
             case .fullResolution:
                 return "Capture at full resolution instead of the free 12 MP limit."
             case .unlimitedPresets:
@@ -43,13 +43,13 @@ final class PremiumManager: ObservableObject {
                 return [
                     "Full-resolution Apple ProRAW capture",
                     "Keeps the free 12 MP option available too",
-                    "Included in the TrueCamera Pro unlock"
+                    "Included in the Grejn Pro unlock"
                 ]
             case .unlimitedPresets:
                 return [
                     "Save more than one custom preset",
                     "Keep different looks ready for different shoots",
-                    "Included in the TrueCamera Pro unlock"
+                    "Included in the Grejn Pro unlock"
                 ]
             }
         }
@@ -180,7 +180,7 @@ final class PremiumManager: ObservableObject {
             try await AppStore.sync()
             await refreshEntitlementStatus()
             if !hasPremiumAccess {
-                errorMessage = "No previous TrueCamera Pro purchases were found for this Apple ID."
+                errorMessage = "No previous Grejn Pro purchases were found for this Apple ID."
             }
         } catch {
             errorMessage = "Restore Purchases failed."

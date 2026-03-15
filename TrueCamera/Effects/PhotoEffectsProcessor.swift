@@ -841,8 +841,14 @@ final class PhotoEffectsProcessor {
 
     nonisolated private func hueWidth(for band: HSLColorBand) -> Double {
         switch band {
-        case .red, .orange: return 40
-        default: return 44
+        case .red: return 32
+        case .orange: return 26
+        case .yellow: return 24
+        case .green: return 28
+        case .aqua: return 26
+        case .blue: return 28
+        case .purple: return 24
+        case .magenta: return 26
         }
     }
 
@@ -850,7 +856,8 @@ final class PhotoEffectsProcessor {
         let d = angularDistance(a: hue, b: center)
         if d >= width { return 0 }
         let normalized = 1 - (d / width)
-        return normalized * normalized
+        let squared = normalized * normalized
+        return squared * squared
     }
 
     nonisolated private func angularDistance(a: Double, b: Double) -> Double {

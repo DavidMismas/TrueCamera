@@ -409,12 +409,12 @@ struct ContentView: View {
                     .font(.caption2.weight(.semibold))
                     .lineLimit(1)
             }
-            .foregroundStyle(isSelected ? themeTeal : themePink.opacity(0.9))
+            .foregroundStyle(isSelected ? themePink.opacity(0.95) : themeTeal)
             .frame(minWidth: 68)
             .padding(.vertical, 8)
             .overlay(alignment: .bottom) {
                 Capsule()
-                    .fill(isSelected ? themeTeal : .clear)
+                    .fill(isSelected ? themePink : .clear)
                     .frame(height: 2)
                     .padding(.horizontal, 6)
                     .offset(y: 4)

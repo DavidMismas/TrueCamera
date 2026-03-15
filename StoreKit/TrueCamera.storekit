@@ -1,0 +1,33 @@
+{
+  "identifier" : "72E07B60-061E-4A56-B3A4-5B7A88D09001",
+  "nonRenewingSubscriptions" : [],
+  "products" : [
+    {
+      "displayPrice" : "19.99",
+      "familyShareable" : false,
+      "internalID" : "49E33209-6226-4B83-B567-1F540EAF1001",
+      "localizations" : [
+        {
+          "description" : "One-time purchase that unlocks full-resolution capture and unlimited presets in TrueCamera.",
+          "displayName" : "TrueCamera Pro",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.david.TrueCamera.pro.lifetime",
+      "referenceName" : "TrueCamera Pro",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_applicationInternalID" : "123456789",
+    "_developerTeamID" : "AX2Z5LF5SG",
+    "_lastSynchronizedDate" : 0,
+    "_locale" : "en_US",
+    "_storefront" : "USA"
+  },
+  "subscriptionGroups" : [],
+  "version" : {
+    "major" : 2,
+    "minor" : 0
+  }
+}

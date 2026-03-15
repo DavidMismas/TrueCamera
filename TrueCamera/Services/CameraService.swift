@@ -319,6 +319,7 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     override init() {
+        let hasPremiumAccess = PremiumAccessStore.readIsPremiumUnlocked()
         let physicalTypes: [AVCaptureDevice.DeviceType] = [
             .builtInUltraWideCamera,
             .builtInWideAngleCamera,
@@ -347,7 +348,9 @@ final class CameraService: NSObject, ObservableObject {
         let storedCapturePriorityRaw = UserDefaults.standard.string(forKey: PreferenceKey.capturePriority)
         self.capturePriority = PhotoCapturePriority(rawValue: storedCapturePriorityRaw ?? "") ?? .quality
         let storedResolutionCapRaw = UserDefaults.standard.string(forKey: PreferenceKey.resolutionCap)
-        self.resolutionCap = PhotoResolutionCap(rawValue: storedResolutionCapRaw ?? "") ?? .full
+        let defaultResolutionCap: PhotoResolutionCap = hasPremiumAccess ? .full : .mp12
+        let resolvedResolutionCap = PhotoResolutionCap(rawValue: storedResolutionCapRaw ?? "") ?? defaultResolutionCap
+        self.resolutionCap = hasPremiumAccess ? resolvedResolutionCap : (resolvedResolutionCap == .full ? .mp12 : resolvedResolutionCap)
         let storedBitDepthRaw = UserDefaults.standard.string(forKey: PreferenceKey.styledHEIFBitDepth)
         self.styledHEIFBitDepth = StyledHEIFBitDepth(rawValue: storedBitDepthRaw ?? "") ?? .tenBit
         let storedCompressionQuality = UserDefaults.standard.object(forKey: PreferenceKey.styledHEIFCompressionQuality) as? Double ?? 1.0
@@ -574,6 +577,11 @@ final class CameraService: NSObject, ObservableObject {
 
     func effectSettingsSnapshot() -> PhotoEffectSettings {
         previewStateQueue.sync { previewEffectSettings }
+    }
+
+    func applyPremiumAccess(_ hasPremiumAccess: Bool) {
+        guard !hasPremiumAccess, resolutionCap == .full else { return }
+        resolutionCap = .mp12
     }
 
     func setLivePreviewEnabled(_ enabled: Bool) {

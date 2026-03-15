@@ -86,6 +86,7 @@ struct ContentView: View {
     nonisolated private static let referencePreviewRenderDimension: CGFloat = 960
 
     @StateObject private var cameraService = CameraService()
+    @EnvironmentObject private var premiumManager: PremiumManager
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var statusMessage: String?
@@ -122,6 +123,29 @@ struct ContentView: View {
 
     private var backgroundQueueCount: Int {
         pendingCaptureJobs.count + (backgroundProcessingInFlight ? 1 : 0)
+    }
+
+    private var visibleEffectPresets: [PhotoEffectPreset] {
+        premiumManager.hasPremiumAccess ? cameraService.effectPresets : Array(cameraService.effectPresets.prefix(1))
+    }
+
+    private var hasReachedFreePresetLimit: Bool {
+        !premiumManager.hasPremiumAccess && !cameraService.effectPresets.isEmpty
+    }
+
+    private var resolutionCapBinding: Binding<PhotoResolutionCap> {
+        Binding(
+            get: { cameraService.resolutionCap },
+            set: { nextValue in
+                guard nextValue == .full, !premiumManager.hasPremiumAccess else {
+                    cameraService.resolutionCap = nextValue
+                    return
+                }
+
+                cameraService.resolutionCap = .mp12
+                premiumManager.presentPaywall(for: .fullResolution)
+            }
+        )
     }
 
     var body: some View {
@@ -248,6 +272,7 @@ struct ContentView: View {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             setInitialControlRotation()
             normalizeCaptureFormatSelection()
+            applyPremiumAccessState()
         }
         .onDisappear {
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
@@ -271,6 +296,12 @@ struct ContentView: View {
         }
         .onChange(of: cameraService.appleProRAWSupported) { _, _ in
             normalizeCaptureFormatSelection()
+        }
+        .onChange(of: premiumManager.hasPremiumAccess) { _, _ in
+            applyPremiumAccessState()
+        }
+        .onChange(of: cameraService.effectPresets.map(\.id)) { _, _ in
+            applyPremiumAccessState()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
             updateControlRotation(for: UIDevice.current.orientation)
@@ -340,7 +371,7 @@ struct ContentView: View {
                     }
                     .id(presetScrollTargetID(for: PhotoEffectLibrary.customPresetID))
 
-                    ForEach(cameraService.effectPresets) { preset in
+                    ForEach(visibleEffectPresets) { preset in
                         presetIcon(
                             title: shortPresetTitle(preset.name),
                             symbol: "camera.filters",
@@ -361,7 +392,7 @@ struct ContentView: View {
             .onChange(of: cameraService.selectedEffectPresetID) { _, _ in
                 scrollPresetStrip(to: proxy, animated: true)
             }
-            .onChange(of: cameraService.effectPresets.map(\.id)) { _, _ in
+            .onChange(of: visibleEffectPresets.map(\.id)) { _, _ in
                 DispatchQueue.main.async {
                     scrollPresetStrip(to: proxy, animated: false)
                 }
@@ -617,6 +648,25 @@ struct ContentView: View {
     private var settingsSheet: some View {
         NavigationStack {
             Form {
+                Section {
+                    if premiumManager.hasPremiumAccess {
+                        Label("TrueCamera Pro unlocked", systemImage: "checkmark.seal.fill")
+                            .foregroundStyle(themeTeal)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Unlock full-resolution Apple ProRAW capture and unlimited saved presets.")
+                                .font(.subheadline)
+                            Button("Unlock TrueCamera Pro") {
+                                premiumManager.presentPaywall(for: .all)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(themeTeal)
+                        }
+                    }
+                } header: {
+                    Text("TrueCamera Pro")
+                }
+
                 Section("Sound & Haptics") {
                     Toggle("Haptic Feedback", isOn: $cameraService.hapticsEnabled)
                     if cameraService.isShutterSoundToggleAvailable {
@@ -646,12 +696,31 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Max Resolution")
                             .font(.subheadline.weight(.semibold))
-                        Picker("Max Resolution", selection: $cameraService.resolutionCap) {
+                        Picker("Max Resolution", selection: resolutionCapBinding) {
                             ForEach(PhotoResolutionCap.allCases) { option in
                                 Text(option.label).tag(option)
                             }
                         }
                         .pickerStyle(.segmented)
+
+                        if !premiumManager.hasPremiumAccess {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "lock.fill")
+                                    .foregroundStyle(themePink.opacity(0.9))
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Full resolution is part of TrueCamera Pro.")
+                                        .font(.footnote.weight(.semibold))
+                                    Text("Free mode uses 12 MP. Upgrade to unlock the full-resolution option.")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                Button("Unlock") {
+                                    premiumManager.presentPaywall(for: .fullResolution)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
                     }
 
                     Toggle("Save Original RAW (.dng) Separately", isOn: $cameraService.saveRAWToLibrary)
@@ -758,10 +827,14 @@ struct ContentView: View {
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
+        .sheet(isPresented: $premiumManager.isPaywallPresented) {
+            PremiumPaywallView()
+                .environmentObject(premiumManager)
+        }
     }
 
     private var selectedUserPreset: PhotoEffectPreset? {
-        cameraService.effectPresets.first(where: { $0.id == cameraService.selectedEffectPresetID })
+        visibleEffectPresets.first(where: { $0.id == cameraService.selectedEffectPresetID })
     }
 
     private var selectedPresetHasUnsavedChanges: Bool {
@@ -789,7 +862,7 @@ struct ContentView: View {
                                     cameraService.resetEffectsToNeutral()
                                     scheduleReferenceRender()
                                 }
-                                ForEach(cameraService.effectPresets) { preset in
+                                ForEach(visibleEffectPresets) { preset in
                                     presetIcon(
                                         title: shortPresetTitle(preset.name),
                                         symbol: "camera.filters",
@@ -806,11 +879,17 @@ struct ContentView: View {
                             TextField("Preset name", text: $presetNameDraft)
                                 .textInputAutocapitalization(.words)
                                 .disableAutocorrection(true)
-                            Button("Save New") {
-                                cameraService.saveCurrentEffectsAsPreset(named: presetNameDraft)
-                                presetNameDraft = ""
+
+                            if hasReachedFreePresetLimit {
+                                Button("Unlock Pro") {
+                                    premiumManager.presentPaywall(for: .unlimitedPresets)
+                                }
+                            } else {
+                                Button("Save New") {
+                                    saveNewPreset()
+                                }
+                                .disabled(presetNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
-                            .disabled(presetNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                             if selectedUserPreset != nil {
                                 Button("Update") {
@@ -820,7 +899,13 @@ struct ContentView: View {
                             }
                         }
 
-                        ForEach(cameraService.effectPresets) { preset in
+                        if hasReachedFreePresetLimit {
+                            Text("Free mode includes 1 saved preset. Upgrade to TrueCamera Pro for unlimited presets.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        ForEach(visibleEffectPresets) { preset in
                             HStack {
                                 Text(preset.name)
                                     .lineLimit(1)
@@ -1028,6 +1113,10 @@ struct ContentView: View {
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
+        .sheet(isPresented: $premiumManager.isPaywallPresented) {
+            PremiumPaywallView()
+                .environmentObject(premiumManager)
+        }
     }
 
     private var referencePreview: some View {
@@ -1176,6 +1265,32 @@ struct ContentView: View {
 
     private func presetScrollTargetID(for presetID: String) -> String {
         "main-preset-\(presetID)"
+    }
+
+    private func saveNewPreset() {
+        guard !hasReachedFreePresetLimit else {
+            premiumManager.presentPaywall(for: .unlimitedPresets)
+            return
+        }
+
+        cameraService.saveCurrentEffectsAsPreset(named: presetNameDraft)
+        presetNameDraft = ""
+    }
+
+    private func applyPremiumAccessState() {
+        cameraService.applyPremiumAccess(premiumManager.hasPremiumAccess)
+
+        guard !premiumManager.hasPremiumAccess else { return }
+        guard cameraService.selectedEffectPresetID != PhotoEffectLibrary.customPresetID else { return }
+
+        let visiblePresetIDs = Set(visibleEffectPresets.map(\.id))
+        guard !visiblePresetIDs.contains(cameraService.selectedEffectPresetID) else { return }
+
+        if let firstVisiblePreset = visibleEffectPresets.first {
+            cameraService.applyEffectPreset(firstVisiblePreset)
+        } else {
+            cameraService.resetEffectsToNeutral()
+        }
     }
 
     private func scrollPresetStrip(to proxy: ScrollViewProxy, animated: Bool) {
@@ -1688,7 +1803,7 @@ private struct ThemedSlider: UIViewRepresentable {
     let thumbColor: Color
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(value: $value)
+        Coordinator(value: $value, sliderValueToActualValue: actualValue(forSliderValue:))
     }
 
     func makeUIView(context: Context) -> UISlider {
@@ -1699,27 +1814,66 @@ private struct ThemedSlider: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UISlider, context: Context) {
-        uiView.minimumValue = Float(range.lowerBound)
-        uiView.maximumValue = Float(range.upperBound)
+        if zeroIsCentered {
+            uiView.minimumValue = 0
+            uiView.maximumValue = 1
+        } else {
+            uiView.minimumValue = Float(range.lowerBound)
+            uiView.maximumValue = Float(range.upperBound)
+        }
         uiView.minimumTrackTintColor = UIColor(minimumTrackColor)
         uiView.maximumTrackTintColor = UIColor(maximumTrackColor)
         uiView.thumbTintColor = UIColor(thumbColor)
 
-        let currentValue = Float(value)
+        let currentValue = sliderValue(forActualValue: value)
         if abs(uiView.value - currentValue) > 0.0001 {
             uiView.value = currentValue
         }
     }
 
+    private var zeroIsCentered: Bool {
+        range.lowerBound < 0 && range.upperBound > 0
+    }
+
+    private func sliderValue(forActualValue actualValue: Double) -> Float {
+        guard zeroIsCentered else { return Float(actualValue) }
+
+        let clamped = min(max(actualValue, range.lowerBound), range.upperBound)
+        if clamped <= 0 {
+            let negativeSpan = abs(range.lowerBound)
+            guard negativeSpan > 0 else { return 0.5 }
+            return Float((clamped - range.lowerBound) / negativeSpan) * 0.5
+        }
+
+        let positiveSpan = range.upperBound
+        guard positiveSpan > 0 else { return 0.5 }
+        return 0.5 + (Float(clamped / positiveSpan) * 0.5)
+    }
+
+    private func actualValue(forSliderValue sliderValue: Float) -> Double {
+        guard zeroIsCentered else { return Double(sliderValue) }
+
+        let clamped = min(max(Double(sliderValue), 0), 1)
+        if clamped <= 0.5 {
+            let progress = clamped / 0.5
+            return range.lowerBound + ((0 - range.lowerBound) * progress)
+        }
+
+        let progress = (clamped - 0.5) / 0.5
+        return range.upperBound * progress
+    }
+
     final class Coordinator: NSObject {
         @Binding private var value: Double
+        private let sliderValueToActualValue: (Float) -> Double
 
-        init(value: Binding<Double>) {
+        init(value: Binding<Double>, sliderValueToActualValue: @escaping (Float) -> Double) {
             _value = value
+            self.sliderValueToActualValue = sliderValueToActualValue
         }
 
         @objc func valueChanged(_ sender: UISlider) {
-            value = Double(sender.value)
+            value = sliderValueToActualValue(sender.value)
         }
     }
 }

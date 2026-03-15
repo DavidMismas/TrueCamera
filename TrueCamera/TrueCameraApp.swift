@@ -11,10 +11,12 @@ import UIKit
 @main
 struct TrueCameraApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var premiumManager = PremiumManager()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(premiumManager)
                 .preferredColorScheme(.dark)
         }
     }

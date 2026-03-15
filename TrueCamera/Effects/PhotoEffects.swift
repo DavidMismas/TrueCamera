@@ -132,8 +132,8 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     static let highlightsRange: ClosedRange<Double> = -1.0...1.0
     static let shadowsRange: ClosedRange<Double> = -1.0...1.0
     static let contrastRange: ClosedRange<Double> = -20...20
-    static let saturationRange: ClosedRange<Double> = -0.7...0.7
-    static let vibranceRange: ClosedRange<Double> = -0.5...0.5
+    static let saturationRange: ClosedRange<Double> = -1.0...0.7
+    static let vibranceRange: ClosedRange<Double> = -1.0...0.5
     static let warmthRange: ClosedRange<Double> = -900...900
     static let tintRange: ClosedRange<Double> = -120...120
     static let clarityRange: ClosedRange<Double> = -1.0...1.0

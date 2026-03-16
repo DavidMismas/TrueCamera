@@ -6,6 +6,7 @@ struct CameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
     let activeDevice: AVCaptureDevice?
     let focusLocked: Bool
+    let livePreviewImage: UIImage?
     var onTapToFocus: ((CGPoint, CGPoint) -> Void)?
     var onLongPressToFocusLock: ((CGPoint, CGPoint) -> Void)?
 
@@ -15,6 +16,7 @@ struct CameraPreviewView: UIViewRepresentable {
         view.videoPreviewLayer.session = session
         view.updateActiveDevice(activeDevice)
         view.setFocusLocked(focusLocked, animated: false)
+        view.updateLivePreviewImage(livePreviewImage, animated: false)
         view.onTapToFocus = onTapToFocus
         view.onLongPressToFocusLock = onLongPressToFocusLock
         return view
@@ -24,6 +26,7 @@ struct CameraPreviewView: UIViewRepresentable {
         uiView.videoPreviewLayer.session = session
         uiView.updateActiveDevice(activeDevice)
         uiView.setFocusLocked(focusLocked, animated: true)
+        uiView.updateLivePreviewImage(livePreviewImage, animated: true)
         uiView.onTapToFocus = onTapToFocus
         uiView.onLongPressToFocusLock = onLongPressToFocusLock
     }
@@ -39,6 +42,15 @@ final class PreviewView: UIView {
     private let focusIndicatorSize: CGFloat = 76
     private let focusLockLabelSize = CGSize(width: 58, height: 16)
     private let focusLockLabelVerticalGap: CGFloat = 8
+    private let livePreviewImageView: UIImageView = {
+        let imageView = UIImageView(frame: .zero)
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        imageView.isUserInteractionEnabled = false
+        imageView.backgroundColor = .clear
+        imageView.alpha = 0
+        return imageView
+    }()
     private let focusIndicatorView: UIView = {
         let view = UIView(frame: CGRect(x: 0, y: 0, width: 76, height: 76))
         view.isUserInteractionEnabled = false
@@ -102,6 +114,7 @@ final class PreviewView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        livePreviewImageView.frame = bounds
         setupRotationIfReady()
     }
 
@@ -181,9 +194,31 @@ final class PreviewView: UIView {
     }
 
     private func setupFocusIndicator() {
+        addSubview(livePreviewImageView)
         focusLockLabel.bounds = CGRect(origin: .zero, size: focusLockLabelSize)
         addSubview(focusIndicatorView)
         addSubview(focusLockLabel)
+    }
+
+    func updateLivePreviewImage(_ image: UIImage?, animated: Bool) {
+        let applyChanges = {
+            self.livePreviewImageView.image = image
+            self.livePreviewImageView.alpha = image == nil ? 0 : 1
+        }
+
+        let shouldAnimateVisibilityChange = animated && ((livePreviewImageView.image == nil) != (image == nil))
+        guard shouldAnimateVisibilityChange else {
+            applyChanges()
+            return
+        }
+
+        UIView.transition(
+            with: livePreviewImageView,
+            duration: image == nil ? 0.12 : 0.08,
+            options: [.transitionCrossDissolve, .beginFromCurrentState, .allowAnimatedContent]
+        ) {
+            applyChanges()
+        }
     }
 
     private func positionFocusLockLabel(near point: CGPoint) {

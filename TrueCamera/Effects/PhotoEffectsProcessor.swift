@@ -48,7 +48,8 @@ final class PhotoEffectsProcessor {
         from pixelBuffer: CVPixelBuffer,
         settings: PhotoEffectSettings,
         isFrontCamera: Bool,
-        maxDimension: CGFloat = 960
+        maxDimension: CGFloat = 960,
+        includeGrain: Bool = false
     ) -> UIImage? {
         let orientation: CGImagePropertyOrientation = isFrontCamera ? .rightMirrored : .right
         
@@ -60,7 +61,7 @@ final class PhotoEffectsProcessor {
         let graded = apply(
             to: input,
             settings: settings,
-            includeGrain: true,
+            includeGrain: includeGrain,
             cubeDimension: previewCubeDimension
         )
 

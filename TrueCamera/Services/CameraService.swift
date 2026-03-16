@@ -159,6 +159,8 @@ final class CameraService: NSObject, ObservableObject {
         static let styledHEIFCompressionQuality = "camera.styledHEIFCompressionQuality"
         static let styledProcessingSource = "camera.styledProcessingSource"
         static let saveRAWToLibrary = "camera.saveRAWToLibrary"
+        static let livePresetPreviewEnabled = "camera.livePresetPreviewEnabled"
+        static let exposureSliderVisible = "camera.exposureSliderVisible"
         static let selectedEffectPresetID = "camera.selectedEffectPresetID"
         static let effectSettingsBlob = "camera.effect.settingsBlob.v3"
         static let effectPresetsBlob = "camera.effect.userPresetsBlob.v2"
@@ -229,6 +231,15 @@ final class CameraService: NSObject, ObservableObject {
     @Published var saveRAWToLibrary: Bool {
         didSet { UserDefaults.standard.set(saveRAWToLibrary, forKey: PreferenceKey.saveRAWToLibrary) }
     }
+    @Published var livePresetPreviewEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(livePresetPreviewEnabled, forKey: PreferenceKey.livePresetPreviewEnabled)
+            updateLivePreviewRenderingState()
+        }
+    }
+    @Published var exposureSliderVisible: Bool {
+        didSet { UserDefaults.standard.set(exposureSliderVisible, forKey: PreferenceKey.exposureSliderVisible) }
+    }
     @Published var exposureBias: Float = 0 {
         didSet { applyExposureBias() }
     }
@@ -292,6 +303,9 @@ final class CameraService: NSObject, ObservableObject {
     nonisolated(unsafe) private var previewRenderingEnabled = true
     nonisolated(unsafe) private var previewOverlayActive = false
     nonisolated(unsafe) private var lastPreviewRenderTime: CFTimeInterval = 0
+    private let livePreviewTargetFPS: Double = 30
+    private let livePreviewMaxRenderDimension: CGFloat = 960
+    private var hasLivePreviewPremiumAccess = false
     private var persistEffectSettingsWorkItem: DispatchWorkItem?
     private var prewarmExportWorkItem: DispatchWorkItem?
 
@@ -358,6 +372,8 @@ final class CameraService: NSObject, ObservableObject {
         let storedProcessingSourceRaw = UserDefaults.standard.string(forKey: PreferenceKey.styledProcessingSource)
         self.styledProcessingSource = StyledProcessingSource(rawValue: storedProcessingSourceRaw ?? "") ?? .proRAW
         self.saveRAWToLibrary = UserDefaults.standard.object(forKey: PreferenceKey.saveRAWToLibrary) as? Bool ?? false
+        self.livePresetPreviewEnabled = UserDefaults.standard.object(forKey: PreferenceKey.livePresetPreviewEnabled) as? Bool ?? false
+        self.exposureSliderVisible = UserDefaults.standard.object(forKey: PreferenceKey.exposureSliderVisible) as? Bool ?? true
         let loadedPresets = Self.loadStoredEffectPresets()
         self.effectPresets = loadedPresets
         self.effectSettings = Self.loadStoredEffectSettings().clamped()
@@ -373,6 +389,8 @@ final class CameraService: NSObject, ObservableObject {
         session.sessionPreset = .photo
         availableLenses = buildLenses(for: .back)
         previewEffectSettings = effectSettings
+        hasLivePreviewPremiumAccess = hasPremiumAccess
+        updateLivePreviewRenderingState()
         if hapticsEnabled {
             DispatchQueue.main.async { [weak self] in
                 self?.shutterHapticGenerator.prepare()
@@ -580,11 +598,19 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func applyPremiumAccess(_ hasPremiumAccess: Bool) {
-        guard !hasPremiumAccess, resolutionCap == .full else { return }
-        resolutionCap = .mp12
+        hasLivePreviewPremiumAccess = hasPremiumAccess
+        if !hasPremiumAccess, resolutionCap == .full {
+            resolutionCap = .mp12
+        }
+        updateLivePreviewRenderingState()
     }
 
     func setLivePreviewEnabled(_ enabled: Bool) {
+        livePresetPreviewEnabled = enabled
+    }
+
+    private func updateLivePreviewRenderingState() {
+        let enabled = hasLivePreviewPremiumAccess && livePresetPreviewEnabled
         previewStateQueue.async { [weak self] in
             self?.previewRenderingEnabled = enabled
         }
@@ -1304,12 +1330,13 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard previewRenderingEnabled else { return }
 
         let now = CACurrentMediaTime()
-        if now - lastPreviewRenderTime < (1.0 / 12.0) { return }
+        if now - lastPreviewRenderTime < (1.0 / livePreviewTargetFPS) { return }
         lastPreviewRenderTime = now
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let (settings, isFrontCamera) = previewStateQueue.sync { (previewEffectSettings, previewIsFrontCamera) }
-        if shouldSkipProcessedPreview(for: settings) {
+        let previewSettings = settings.livePreviewRenderable
+        if shouldSkipProcessedPreview(for: previewSettings) {
             if previewOverlayActive {
                 previewOverlayActive = false
                 DispatchQueue.main.async { [weak self] in
@@ -1322,8 +1349,10 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
         autoreleasepool {
             guard let previewImage = effectsProcessor.renderPreviewImage(
                 from: pixelBuffer,
-                settings: settings,
-                isFrontCamera: isFrontCamera
+                settings: previewSettings,
+                isFrontCamera: isFrontCamera,
+                maxDimension: livePreviewMaxRenderDimension,
+                includeGrain: false
             ) else { return }
             previewOverlayActive = true
 

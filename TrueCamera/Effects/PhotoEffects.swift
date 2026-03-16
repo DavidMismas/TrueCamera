@@ -203,6 +203,16 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
         result.colorGrading.highlights = clampedTone(result.colorGrading.highlights)
         return result
     }
+
+    var livePreviewRenderable: PhotoEffectSettings {
+        var result = clamped()
+        result.bloomIntensity = 0
+        result.bloomRadius = 0
+        result.vignetteIntensity = 0
+        result.vignetteRadius = 0
+        result.grainAmount = 0
+        return result
+    }
 }
 
 extension PhotoEffectSettings {

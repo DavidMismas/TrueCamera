@@ -7,6 +7,7 @@ final class PremiumManager: ObservableObject {
     enum LockedFeature {
         case all
         case fullResolution
+        case livePresetPreview
         case unlimitedPresets
 
         var title: String {
@@ -15,6 +16,8 @@ final class PremiumManager: ObservableObject {
                 return "Grejn Pro"
             case .fullResolution:
                 return "Unlock Full Resolution"
+            case .livePresetPreview:
+                return "Unlock Live Preset Preview"
             case .unlimitedPresets:
                 return "Unlock Unlimited Presets"
             }
@@ -26,6 +29,8 @@ final class PremiumManager: ObservableObject {
                 return "Unlock the complete Pro workflow for Grejn."
             case .fullResolution:
                 return "Capture at full resolution instead of the free 12 MP limit."
+            case .livePresetPreview:
+                return "See your preset's tone and color adjustments directly in the camera preview."
             case .unlimitedPresets:
                 return "Save and manage more than one custom preset."
             }
@@ -36,6 +41,7 @@ final class PremiumManager: ObservableObject {
             case .all:
                 return [
                     "Full-resolution Apple ProRAW capture",
+                    "Live preset preview in the camera view",
                     "Unlimited custom preset saves",
                     "One-time purchase with restore support"
                 ]
@@ -43,6 +49,12 @@ final class PremiumManager: ObservableObject {
                 return [
                     "Full-resolution Apple ProRAW capture",
                     "Keeps the free 12 MP option available too",
+                    "Included in the Grejn Pro unlock"
+                ]
+            case .livePresetPreview:
+                return [
+                    "Preview tone, color, clarity, and sharpness before you shoot",
+                    "Keeps the camera view responsive by skipping grain, bloom, and vignette",
                     "Included in the Grejn Pro unlock"
                 ]
             case .unlimitedPresets:

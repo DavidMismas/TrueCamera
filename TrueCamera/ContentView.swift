@@ -148,6 +148,21 @@ struct ContentView: View {
         )
     }
 
+    private var livePresetPreviewBinding: Binding<Bool> {
+        Binding(
+            get: { premiumManager.hasPremiumAccess && cameraService.livePresetPreviewEnabled },
+            set: { nextValue in
+                guard nextValue, !premiumManager.hasPremiumAccess else {
+                    cameraService.livePresetPreviewEnabled = nextValue
+                    return
+                }
+
+                cameraService.livePresetPreviewEnabled = false
+                premiumManager.presentPaywall(for: .livePresetPreview)
+            }
+        )
+    }
+
     var body: some View {
         ZStack {
             LinearGradient(
@@ -182,6 +197,7 @@ struct ContentView: View {
                                 session: cameraService.session,
                                 activeDevice: cameraService.activeVideoDevice,
                                 focusLocked: cameraService.focusLocked,
+                                livePreviewImage: cameraService.livePreviewImage,
                                 onTapToFocus: { _, devicePoint in
                                     cameraService.focus(at: devicePoint, lockFocus: false)
                                 },
@@ -208,8 +224,10 @@ struct ContentView: View {
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     VStack(spacing: 0) {
-                        exposureSlider
-                            .padding(.top, 8)
+                        if cameraService.exposureSliderVisible {
+                            exposureSlider
+                                .padding(.top, 8)
+                        }
 
                         presetStrip
                             .padding(.top, 8)
@@ -266,7 +284,6 @@ struct ContentView: View {
         }
         .onAppear {
             cameraService.onPhotoCapture = handleCaptureResult
-            cameraService.setLivePreviewEnabled(false)
             requestPhotosPermissionIfNeeded()
             cameraService.requestPermissionIfNeeded()
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
@@ -804,6 +821,47 @@ struct ContentView: View {
                     Text("Styled Export")
                 }
 
+                Section {
+                    if premiumManager.hasPremiumAccess {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Live Preset Preview", isOn: livePresetPreviewBinding)
+                            Text("Shows your preset's tone and color changes directly in the camera preview. Grain, bloom, and vignette are still applied after capture.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "lock.fill")
+                                .foregroundStyle(themePink.opacity(0.9))
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Live Preset Preview is part of Grejn Pro.")
+                                    .font(.footnote.weight(.semibold))
+                                Text("See tone and color changes on the live camera view before you shoot. Grain, bloom, and vignette are still added after capture.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 8)
+                            Button("Unlock") {
+                                premiumManager.presentPaywall(for: .livePresetPreview)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                } header: {
+                    Text("Preview")
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Show Exposure Slider", isOn: $cameraService.exposureSliderVisible)
+                        Text("Shows or hides the manual exposure control under the camera preview.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("Controls")
+                }
+
                 if !cameraService.appleProRAWSupported {
                     Section("Compatibility") {
                         Text("ProRAW is not supported on the current device/lens.")
@@ -826,6 +884,9 @@ struct ContentView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Text("HEIF Compression: 100% keeps the largest files and the least compression. Around 85% usually saves a lot of space with only a small quality drop.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("Live Preset Preview: Shows your preset's tone and color adjustments in real time. Grain, bloom, and vignette stay capture-only so preview remains responsive.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Text("Capture uses Apple ProRAW at \(cameraService.resolutionCap.label) resolution.")

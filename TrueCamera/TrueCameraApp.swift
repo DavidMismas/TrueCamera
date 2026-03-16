@@ -29,4 +29,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> UIInterfaceOrientationMask {
         .portrait
     }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        application.isIdleTimerDisabled = true
+    }
+
+    func applicationWillResignActive(_ application: UIApplication) {
+        application.isIdleTimerDisabled = false
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        application.isIdleTimerDisabled = false
+    }
 }

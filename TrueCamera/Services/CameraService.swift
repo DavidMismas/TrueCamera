@@ -841,6 +841,23 @@ final class CameraService: NSObject, ObservableObject {
             )
 
             let maxTeleZoom = Double(teleDevice.activeFormat.videoMaxZoomFactor)
+            let teleCrop15Zoom = 1.5
+            if maxTeleZoom >= teleCrop15Zoom {
+                let teleCrop15MM = roundedMillimeters(Double(teleMM) * teleCrop15Zoom)
+                lenses.append(
+                    CameraLens(
+                        id: "\(pos)-\(type)-tele-1_5x-crop",
+                        name: "\(teleCrop15MM)mm",
+                        deviceUniqueID: teleDevice.uniqueID,
+                        deviceType: teleDevice.deviceType,
+                        position: teleDevice.position,
+                        isCropped: true,
+                        zoomFactor: CGFloat(teleCrop15Zoom),
+                        sortOrder: teleCrop15MM * 10 + 1
+                    )
+                )
+            }
+
             if maxTeleZoom >= 1.95 {
                 let teleCropMM = roundedMillimeters(Double(teleMM) * 2.0)
                 lenses.append(

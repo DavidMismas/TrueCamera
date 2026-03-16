@@ -685,6 +685,9 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Photo Priority")
                             .font(.subheadline.weight(.semibold))
+                        Text("Choose whether the camera should save a little faster or spend more time getting the cleanest result.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                         Picker("Photo Priority", selection: $cameraService.capturePriority) {
                             ForEach(PhotoCapturePriority.allCases) { option in
                                 Text(option.label).tag(option)
@@ -696,6 +699,9 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Max Resolution")
                             .font(.subheadline.weight(.semibold))
+                        Text("Full keeps the most detail. 12 MP is quicker to save and uses less storage.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                         Picker("Max Resolution", selection: resolutionCapBinding) {
                             ForEach(PhotoResolutionCap.allCases) { option in
                                 Text(option.label).tag(option)
@@ -723,17 +729,23 @@ struct ContentView: View {
                         }
                     }
 
-                    Toggle("Save Original RAW (.dng) Separately", isOn: $cameraService.saveRAWToLibrary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Save Original RAW (.dng)", isOn: $cameraService.saveRAWToLibrary)
+                        Text("Keeps the untouched DNG from the camera in your Photos library.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 } header: {
                     Text("Capture")
-                } footer: {
-                    Text("Balanced is typically faster; Quality may improve low-light/detail at the cost of longer processing time. Lower max resolution can reduce capture and post-processing time. When RAW save is enabled, the original DNG is stored as a separate asset.")
                 }
 
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Processing Source")
                             .font(.subheadline.weight(.semibold))
+                        Text("Choose which version the app uses to create your styled photo.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                         Picker("Styled Processing Source", selection: $cameraService.styledProcessingSource) {
                             ForEach(StyledProcessingSource.allCases) { source in
                                 Text(source.shortLabel).tag(source)
@@ -745,6 +757,9 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("HEIF Bit Depth")
                             .font(.subheadline.weight(.semibold))
+                        Text("10-bit keeps smoother color gradients. 8-bit exports faster and makes smaller files.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                         Picker("Styled HEIF Bit Depth", selection: $cameraService.styledHEIFBitDepth) {
                             ForEach(StyledHEIFBitDepth.allCases) { bitDepth in
                                 Text(bitDepth.shortLabel).tag(bitDepth)
@@ -762,6 +777,9 @@ struct ContentView: View {
                                 .font(.caption.monospacedDigit().weight(.semibold))
                                 .foregroundStyle(themeTextSecondary)
                         }
+                        Text("Move right for higher quality and larger files. Move left for smaller files and faster saves.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
 
                         ThemedSlider(
                             value: heifCompressionPercentBinding,
@@ -784,8 +802,6 @@ struct ContentView: View {
                     }
                 } header: {
                     Text("Styled Export")
-                } footer: {
-                    Text("ProRAW source gives best quality. Processed source is faster. 10-bit HEIF keeps smoother gradients; 8-bit exports faster and smaller. Compression 100 keeps the largest files; 85 reduces size noticeably while keeping 48 MP.")
                 }
 
                 if !cameraService.appleProRAWSupported {
@@ -796,14 +812,28 @@ struct ContentView: View {
                     }
                 }
 
-                Section("Format") {
+                Section("Info") {
+                    Text("Photo Priority: Balanced is usually faster. Quality can help in low light or fine detail, but it may take longer to save.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("Max Resolution: Full keeps maximum detail. 12 MP is lighter, faster, and easier on storage.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("Processing Source: ProRAW gives the best base quality for styled exports. Processed is the faster option.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("HEIF Bit Depth: 10-bit keeps smoother gradients. 8-bit saves faster and uses less space.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("HEIF Compression: 100% keeps the largest files and the least compression. Around 85% usually saves a lot of space with only a small quality drop.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                     Text("Capture uses Apple ProRAW at \(cameraService.resolutionCap.label) resolution.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Text("RAW .dng is stored as a separate original asset when enabled above.")
+                    Text("If Save Original RAW is on, the untouched DNG is also stored in Photos.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-
                 }
             }
             .tint(themeTeal)

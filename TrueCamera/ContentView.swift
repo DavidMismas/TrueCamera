@@ -557,46 +557,42 @@ struct ContentView: View {
     }
 
     private var lensSelector: some View {
-        HStack(spacing: 0) {
-            if let currentLens {
-                lensTitle(currentLens, textFont: .footnote.weight(.semibold))
+        Menu {
+            if cameraService.availableLenses.isEmpty {
+                Button("No lenses available") {}
+                    .disabled(true)
             } else {
-                Text("Lens")
-                    .font(.footnote.weight(.semibold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-        }
-        .foregroundStyle(themePink.opacity(0.95))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 8)
-        .contentShape(Rectangle())
-        .overlay {
-            // Invisible menu overlapping the hit area
-            Menu {
-                if cameraService.availableLenses.isEmpty {
-                    Button("No lenses available") {}
-                        .disabled(true)
-                } else {
-                    ForEach(cameraService.availableLenses) { lens in
-                        Button {
-                            cameraService.selectLens(lens)
-                        } label: {
-                            HStack(spacing: 8) {
-                                Text(lensMenuTitle(lens))
-                                    .font(.body)
-                                Spacer(minLength: 8)
-                                if cameraService.selectedLens?.id == lens.id {
-                                    Image(systemName: "checkmark")
-                                        .font(.caption.weight(.bold))
-                                }
+                ForEach(cameraService.availableLenses) { lens in
+                    Button {
+                        cameraService.selectLens(lens)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(lensMenuTitle(lens))
+                                .font(.body)
+                            Spacer(minLength: 8)
+                            if cameraService.selectedLens?.id == lens.id {
+                                Image(systemName: "checkmark")
+                                    .font(.caption.weight(.bold))
                             }
                         }
                     }
                 }
-            } label: {
-                Color.black.opacity(0.001)
             }
+        } label: {
+            HStack(spacing: 0) {
+                if let currentLens {
+                    lensTitle(currentLens, textFont: .footnote.weight(.semibold))
+                } else {
+                    Text("Lens")
+                        .font(.footnote.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            .foregroundStyle(themePink.opacity(0.95))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
         }
         .disabled(cameraService.availableLenses.isEmpty)
         .tint(themePink)

@@ -94,6 +94,7 @@ struct ContentView: View {
     @State private var controlRotationAngle: Angle = .zero
     @State private var showSettingsSheet = false
     @State private var showEffectsSheet = false
+    @State private var showLensPicker = false
     @State private var renderedReferenceImage: UIImage?
     @State private var referenceRenderTask: Task<Void, Never>?
     @State private var referenceRenderGeneration: UInt64 = 0
@@ -557,27 +558,8 @@ struct ContentView: View {
     }
 
     private var lensSelector: some View {
-        Menu {
-            if cameraService.availableLenses.isEmpty {
-                Button("No lenses available") {}
-                    .disabled(true)
-            } else {
-                ForEach(cameraService.availableLenses) { lens in
-                    Button {
-                        cameraService.selectLens(lens)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text(lensMenuTitle(lens))
-                                .font(.body)
-                            Spacer(minLength: 8)
-                            if cameraService.selectedLens?.id == lens.id {
-                                Image(systemName: "checkmark")
-                                    .font(.caption.weight(.bold))
-                            }
-                        }
-                    }
-                }
-            }
+        Button {
+            showLensPicker = true
         } label: {
             HStack(spacing: 0) {
                 if let currentLens {
@@ -590,15 +572,18 @@ struct ContentView: View {
                 }
             }
             .foregroundStyle(themePink.opacity(0.95))
+            .frame(minWidth: 76, minHeight: 44, alignment: .leading)
             .padding(.horizontal, 8)
-            .padding(.vertical, 8)
             .contentShape(Rectangle())
         }
         .disabled(cameraService.availableLenses.isEmpty)
-        .tint(themePink)
         .rotationEffect(controlRotationAngle, anchor: .center)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
         .buttonStyle(.plain)
+        .popover(isPresented: $showLensPicker, attachmentAnchor: .rect(.bounds), arrowEdge: .bottom) {
+            lensPickerPopover
+                .presentationCompactAdaptation(.popover)
+        }
     }
 
     @ViewBuilder
@@ -617,8 +602,68 @@ struct ContentView: View {
         }
     }
 
-    private func lensMenuTitle(_ lens: CameraLens) -> String {
-        lens.isCropped ? "\(lens.name) ●" : lens.name
+    private var lensPickerLenses: [CameraLens] {
+        Array(cameraService.availableLenses.reversed())
+    }
+
+    @ViewBuilder
+    private func lensPickerTitle(_ lens: CameraLens) -> some View {
+        HStack(spacing: 5) {
+            Text(lens.name)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(themeTextPrimary)
+            if lens.isCropped {
+                Text("●")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(themePink)
+            }
+        }
+    }
+
+    private var lensPickerPopover: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if cameraService.availableLenses.isEmpty {
+                Text("No lenses available")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(themeTextSecondary)
+            } else {
+                ForEach(lensPickerLenses) { lens in
+                    Button {
+                        showLensPicker = false
+                        cameraService.selectLens(lens)
+                    } label: {
+                        HStack(spacing: 10) {
+                            lensPickerTitle(lens)
+                            Spacer(minLength: 8)
+                            if cameraService.selectedLens?.id == lens.id {
+                                Image(systemName: "checkmark")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(themePink)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color.white.opacity(cameraService.selectedLens?.id == lens.id ? 0.12 : 0.04))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(10)
+        .frame(width: 176)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(themeBackgroundTop.opacity(0.96))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(themeTeal.opacity(0.22), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.24), radius: 16, y: 10)
     }
 
     private var currentLens: CameraLens? {

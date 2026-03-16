@@ -9,6 +9,7 @@ import UIKit
 nonisolated struct CameraLens: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
+    let deviceUniqueID: String
     let deviceType: AVCaptureDevice.DeviceType
     let position: AVCaptureDevice.Position
     let isCropped: Bool
@@ -676,9 +677,6 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func selectLens(_ lens: CameraLens) {
-        DispatchQueue.main.async { [weak self] in
-            self?.selectedLens = lens
-        }
         sessionQueue.async { [weak self] in
             guard let self, lens.position == self.currentPosition else { return }
             self.configureInput(for: lens)
@@ -729,6 +727,7 @@ final class CameraService: NSObject, ObservableObject {
                 CameraLens(
                     id: "\(device.position.rawValue)-\(device.deviceType.rawValue)",
                     name: "Front",
+                    deviceUniqueID: device.uniqueID,
                     deviceType: device.deviceType,
                     position: device.position,
                     isCropped: false,
@@ -748,6 +747,7 @@ final class CameraService: NSObject, ObservableObject {
                 CameraLens(
                     id: "\(ultraDevice.position.rawValue)-\(ultraDevice.deviceType.rawValue)",
                     name: "14mm",
+                    deviceUniqueID: ultraDevice.uniqueID,
                     deviceType: ultraDevice.deviceType,
                     position: ultraDevice.position,
                     isCropped: false,
@@ -755,6 +755,24 @@ final class CameraService: NSObject, ObservableObject {
                     sortOrder: 140
                 )
             )
+
+            let ultraCropZoom = 1.5
+            let maxUltraZoom = Double(ultraDevice.activeFormat.videoMaxZoomFactor)
+            if maxUltraZoom >= ultraCropZoom {
+                let ultraCropMM = roundedMillimeters(14.0 * ultraCropZoom)
+                lenses.append(
+                    CameraLens(
+                        id: "\(ultraDevice.position.rawValue)-\(ultraDevice.deviceType.rawValue)-ultra-crop",
+                        name: "\(ultraCropMM)mm",
+                        deviceUniqueID: ultraDevice.uniqueID,
+                        deviceType: ultraDevice.deviceType,
+                        position: ultraDevice.position,
+                        isCropped: true,
+                        zoomFactor: CGFloat(ultraCropZoom),
+                        sortOrder: ultraCropMM * 10 + 1
+                    )
+                )
+            }
         }
 
         if let wideDevice {
@@ -764,6 +782,7 @@ final class CameraService: NSObject, ObservableObject {
                 CameraLens(
                     id: "\(pos)-\(type)",
                     name: "24mm",
+                    deviceUniqueID: wideDevice.uniqueID,
                     deviceType: wideDevice.deviceType,
                     position: wideDevice.position,
                     isCropped: false,
@@ -779,6 +798,7 @@ final class CameraService: NSObject, ObservableObject {
                     CameraLens(
                         id: "\(pos)-\(type)-35mm-crop",
                         name: "35mm",
+                        deviceUniqueID: wideDevice.uniqueID,
                         deviceType: wideDevice.deviceType,
                         position: wideDevice.position,
                         isCropped: true,
@@ -792,6 +812,7 @@ final class CameraService: NSObject, ObservableObject {
                     CameraLens(
                         id: "\(pos)-\(type)-50mm-crop",
                         name: "50mm",
+                        deviceUniqueID: wideDevice.uniqueID,
                         deviceType: wideDevice.deviceType,
                         position: wideDevice.position,
                         isCropped: true,
@@ -810,6 +831,7 @@ final class CameraService: NSObject, ObservableObject {
                 CameraLens(
                     id: "\(pos)-\(type)",
                     name: "\(teleMM)mm",
+                    deviceUniqueID: teleDevice.uniqueID,
                     deviceType: teleDevice.deviceType,
                     position: teleDevice.position,
                     isCropped: false,
@@ -825,6 +847,7 @@ final class CameraService: NSObject, ObservableObject {
                     CameraLens(
                         id: "\(pos)-\(type)-tele-2x-crop",
                         name: "\(teleCropMM)mm",
+                        deviceUniqueID: teleDevice.uniqueID,
                         deviceType: teleDevice.deviceType,
                         position: teleDevice.position,
                         isCropped: true,
@@ -841,6 +864,7 @@ final class CameraService: NSObject, ObservableObject {
                 CameraLens(
                     id: "\(fallback.position.rawValue)-\(fallback.deviceType.rawValue)",
                     name: "24mm",
+                    deviceUniqueID: fallback.uniqueID,
                     deviceType: fallback.deviceType,
                     position: fallback.position,
                     isCropped: false,
@@ -861,7 +885,8 @@ final class CameraService: NSObject, ObservableObject {
 
     private func configureInput(for lens: CameraLens?) {
         guard let lens else { return }
-        guard let device = AVCaptureDevice.default(lens.deviceType, for: .video, position: lens.position)
+        guard let device = AVCaptureDevice(uniqueID: lens.deviceUniqueID)
+                ?? AVCaptureDevice.default(lens.deviceType, for: .video, position: lens.position)
                 ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: lens.position)
         else { return }
 
@@ -871,7 +896,7 @@ final class CameraService: NSObject, ObservableObject {
 
         defer { DispatchQueue.main.async { self.selectedLens = lens } }
 
-        if let currentInput, currentInput.device == device {
+        if let currentInput, currentInput.device.uniqueID == device.uniqueID {
             applyZoom(lens.zoomFactor, to: device)
             updateFocusCapabilities(for: device)
             updateExposureBiasRange(for: device)

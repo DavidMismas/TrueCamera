@@ -384,7 +384,7 @@ final class PhotoEffectsProcessor {
         }
 
         if shouldApplyExtremeToneProtection(for: settings) {
-            output = applyExtremeToneProtection(to: output)
+            output = applyExtremeToneProtection(to: output, settings: settings)
         }
 
         if settings.bloomIntensity > 0.0001 {
@@ -434,17 +434,36 @@ final class PhotoEffectsProcessor {
             settings.colorGrading != .neutral
     }
 
-    nonisolated private func applyExtremeToneProtection(to image: CIImage) -> CIImage {
+    nonisolated private func applyExtremeToneProtection(to image: CIImage, settings: PhotoEffectSettings) -> CIImage {
         var output = image
+        let blackFadeAmount = clamp(settings.blackFade, 0, 1)
+        let whiteFadeAmount = clamp(settings.whiteFade, 0, 1)
+        let openedBlacks = clamp(max(settings.blacks, 0), 0, 1)
+        let crushedBlacks = clamp(max(-settings.blacks, 0), 0, 1)
 
         if let toneCurve = CIFilter(name: "CIToneCurve") {
             toneCurve.setValue(output, forKey: kCIInputImageKey)
             // Soft toe + shoulder to avoid hard black/white clipping after grading.
-            toneCurve.setValue(CIVector(x: 0.00, y: 0.014), forKey: "inputPoint0")
-            toneCurve.setValue(CIVector(x: 0.12, y: 0.124), forKey: "inputPoint1")
+            toneCurve.setValue(
+                CIVector(x: 0.00, y: clamp(0.010 + (0.115 * blackFadeAmount), 0, 1)),
+                forKey: "inputPoint0"
+            )
+            toneCurve.setValue(
+                CIVector(
+                    x: 0.12,
+                    y: clamp(0.124 + (0.090 * blackFadeAmount) + (0.045 * openedBlacks) - (0.070 * crushedBlacks), 0, 1)
+                ),
+                forKey: "inputPoint1"
+            )
             toneCurve.setValue(CIVector(x: 0.50, y: 0.50), forKey: "inputPoint2")
-            toneCurve.setValue(CIVector(x: 0.88, y: 0.872), forKey: "inputPoint3")
-            toneCurve.setValue(CIVector(x: 1.00, y: 0.988), forKey: "inputPoint4")
+            toneCurve.setValue(
+                CIVector(x: 0.88, y: clamp(0.872 - (0.055 * whiteFadeAmount), 0, 1)),
+                forKey: "inputPoint3"
+            )
+            toneCurve.setValue(
+                CIVector(x: 1.00, y: clamp(0.988 - (0.115 * whiteFadeAmount), 0, 1)),
+                forKey: "inputPoint4"
+            )
             if let curved = toneCurve.outputImage {
                 output = curved
             }
@@ -452,8 +471,8 @@ final class PhotoEffectsProcessor {
 
         let highlightShadow = CIFilter.highlightShadowAdjust()
         highlightShadow.inputImage = output
-        highlightShadow.shadowAmount = 0.03
-        highlightShadow.highlightAmount = 0.985
+        highlightShadow.shadowAmount = Float(max(-0.08, 0.03 - (0.026 * blackFadeAmount) - (0.018 * openedBlacks) - (0.065 * crushedBlacks)))
+        highlightShadow.highlightAmount = Float(max(0.90, 0.985 - (0.035 * whiteFadeAmount)))
         return highlightShadow.outputImage?.cropped(to: image.extent) ?? output
     }
 
@@ -516,23 +535,23 @@ final class PhotoEffectsProcessor {
 
             // Positive blacks should open deep shadow detail without creating a matte black floor.
             // Keep the absolute black point pinned close to zero; reshape the toe above it instead.
-            let point0Y = clamp((0.006 * whitesLift) + (0.085 * blackFadeAmount), 0, 1)
+            let point0Y = clamp((0.010 * whitesLift) + (0.155 * blackFadeAmount) - (0.090 * blacksDepth), 0, 1)
             let point1X = 0.20
-            let point1Y = clamp(0.20 + (0.110 * blacksLift) - (0.075 * blacksDepth) + (0.070 * blackFadeAmount), 0, 1)
+            let point1Y = clamp(0.20 + (0.185 * blacksLift) - (0.215 * blacksDepth) + (0.120 * blackFadeAmount), 0, 1)
             let point2Y = clamp(
                 0.50 +
-                    (0.012 * whitesLift) +
-                    (0.020 * blacksLift) -
-                    (0.008 * whitesCompression) -
-                    (0.016 * blacksDepth) +
-                    (0.010 * blackFadeAmount) -
-                    (0.010 * whiteFadeAmount),
+                    (0.018 * whitesLift) +
+                    (0.040 * blacksLift) -
+                    (0.012 * whitesCompression) -
+                    (0.060 * blacksDepth) +
+                    (0.020 * blackFadeAmount) -
+                    (0.018 * whiteFadeAmount),
                 0,
                 1
             )
             let point3X = 0.80
-            let point3Y = clamp(0.80 + (0.085 * whitesLift) - (0.060 * whitesCompression) - (0.070 * whiteFadeAmount), 0, 1)
-            let point4Y = clamp(1.0 + (0.045 * whitesLift) - (0.070 * whitesCompression) - (0.110 * whiteFadeAmount), 0, 1)
+            let point3Y = clamp(0.80 + (0.115 * whitesLift) - (0.085 * whitesCompression) - (0.105 * whiteFadeAmount), 0, 1)
+            let point4Y = clamp(1.0 + (0.060 * whitesLift) - (0.095 * whitesCompression) - (0.165 * whiteFadeAmount), 0, 1)
 
             toneCurve.setValue(output, forKey: kCIInputImageKey)
             toneCurve.setValue(CIVector(x: 0.00, y: point0Y), forKey: "inputPoint0")

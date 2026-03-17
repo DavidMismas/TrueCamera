@@ -16,6 +16,14 @@ nonisolated private struct SendableFloatPointer: @unchecked Sendable {
     let pointer: UnsafeMutablePointer<Float>
 }
 
+nonisolated private struct HueBandSpan {
+    let center: Double
+    let leftWidth: Double
+    let rightWidth: Double
+    let supportMultiplier: Double
+    let falloffExponent: Double
+}
+
 final class PhotoEffectsProcessor {
     private let previewContext: CIContext
     private let exportContext: CIContext
@@ -662,30 +670,38 @@ final class PhotoEffectsProcessor {
     nonisolated private func applyHSLMix(to rgb: SIMD3<Double>, hsl: HSLAdjustments) -> SIMD3<Double> {
         let original = rgb
         var (hue, saturation, lightness) = rgbToHsl(rgb)
+        let sourceSaturation = saturation
+        let sourceLightness = lightness
 
         var hueShiftSum = 0.0
         var satDeltaSum = 0.0
         var lightDeltaSum = 0.0
         var weightSum = 0.0
         var strongestNegativeSaturation = 0.0
+        var strongestWeight = 0.0
 
         for band in HSLColorBand.allCases {
             let adjustment = hsl[band]
-            let weight = hueBandWeight(hue: hue, center: hueCenter(for: band), width: hueWidth(for: band))
+            let weight = hueBandWeight(hue: hue, span: effectiveHueSpan(for: band, adjustment: adjustment))
             if weight <= 0.0001 { continue }
             hueShiftSum += adjustment.hueShift * weight
             satDeltaSum += adjustment.saturationDelta * weight
             lightDeltaSum += adjustment.lightnessDelta * weight
             weightSum += weight
             strongestNegativeSaturation = min(strongestNegativeSaturation, adjustment.saturationDelta)
+            strongestWeight = max(strongestWeight, weight)
         }
 
         var saturationDelta = 0.0
+        var averagedHueShift = 0.0
+        var averagedLightDelta = 0.0
         if weightSum > 0 {
             saturationDelta = satDeltaSum / weightSum
-            hue += hueShiftSum / weightSum
+            averagedHueShift = hueShiftSum / weightSum
+            averagedLightDelta = lightDeltaSum / weightSum
+            hue += averagedHueShift
             saturation *= (1 + saturationDelta)
-            lightness += (lightDeltaSum / weightSum)
+            lightness += averagedLightDelta
         }
 
         hue = wrapHue(hue)
@@ -693,15 +709,30 @@ final class PhotoEffectsProcessor {
         lightness = clamp(lightness, 0, 1)
         let adjusted = hslToRgb(h: hue, s: saturation, l: lightness)
 
-        // Hue in near-neutral pixels is unstable and creates blotchy walls/highlights.
-        let chromaWeight = smoothstep(0.10, 0.34, rgbSaturation(original))
-        let shadowGuard = smoothstep(0.04, 0.14, lightness)
-        let highlightGuard = 1 - smoothstep(0.90, 0.98, lightness)
-        let protection = chromaWeight * shadowGuard * highlightGuard
+        // HSL should stay active across the full light-dark spectrum and only back off near neutrals.
+        let sourceColorfulness = max(rgbSaturation(original), sourceSaturation)
+        guard sourceColorfulness > 0.03 else { return original }
+
+        let chromaWeight = smoothstep(0.03, 0.22, sourceColorfulness)
+        let shadowCoverage = 0.48 + (0.52 * smoothstep(0.0, 0.08, sourceLightness))
+        let highlightCoverage = 0.62 + (0.38 * (1 - smoothstep(0.96, 0.995, sourceLightness)))
+        let tonalCoverage = shadowCoverage * highlightCoverage
+        let baseProtection = chromaWeight * tonalCoverage
 
         let negativeSaturationStrength = clamp(max(-saturationDelta, -strongestNegativeSaturation), 0, 1)
-        let saturationMix = max(protection, negativeSaturationStrength)
-        return mix(original, adjusted, t: saturationMix)
+        let hueShiftStrength = clamp(abs(averagedHueShift) / PhotoEffectSettings.hslHueRange.upperBound, 0, 1)
+        let lightnessStrength = clamp(
+            abs(averagedLightDelta) / PhotoEffectSettings.hslLightnessRange.upperBound,
+            0,
+            1
+        )
+        let saturationStrength = clamp(abs(saturationDelta), 0, 1)
+
+        let hueMix = hueShiftStrength * strongestWeight * max(chromaWeight, 0.18) * tonalCoverage
+        let tonalMix = max(saturationStrength, lightnessStrength) * strongestWeight * max(chromaWeight, 0.22) * tonalCoverage
+
+        let totalMix = max(baseProtection, max(negativeSaturationStrength, max(hueMix, tonalMix)))
+        return mix(original, adjusted, t: totalMix)
     }
 
     nonisolated private func shouldApplyShadowChromaStabilization(
@@ -945,43 +976,76 @@ final class PhotoEffectsProcessor {
         return (a * (1 - clampedT)) + (b * clampedT)
     }
 
-    nonisolated private func hueCenter(for band: HSLColorBand) -> Double {
+    nonisolated private func baseHueSpan(for band: HSLColorBand) -> HueBandSpan {
         switch band {
-        case .red: return 0
-        case .orange: return 32
-        case .yellow: return 62
-        case .green: return 122
-        case .aqua: return 178
-        case .blue: return 225
-        case .purple: return 275
-        case .magenta: return 318
+        case .red:
+            return HueBandSpan(center: 0, leftWidth: 42, rightWidth: 38, supportMultiplier: 1.20, falloffExponent: 0.95)
+        case .orange:
+            return HueBandSpan(center: 32, leftWidth: 34, rightWidth: 34, supportMultiplier: 1.20, falloffExponent: 0.96)
+        case .yellow:
+            return HueBandSpan(center: 56, leftWidth: 34, rightWidth: 78, supportMultiplier: 1.28, falloffExponent: 0.82)
+        case .green:
+            return HueBandSpan(center: 110, leftWidth: 86, rightWidth: 78, supportMultiplier: 1.32, falloffExponent: 0.80)
+        case .aqua:
+            return HueBandSpan(center: 184, leftWidth: 74, rightWidth: 50, supportMultiplier: 1.28, falloffExponent: 0.84)
+        case .blue:
+            return HueBandSpan(center: 225, leftWidth: 40, rightWidth: 38, supportMultiplier: 1.20, falloffExponent: 0.94)
+        case .purple:
+            return HueBandSpan(center: 275, leftWidth: 34, rightWidth: 34, supportMultiplier: 1.18, falloffExponent: 0.95)
+        case .magenta:
+            return HueBandSpan(center: 318, leftWidth: 40, rightWidth: 36, supportMultiplier: 1.20, falloffExponent: 0.94)
         }
     }
 
-    nonisolated private func hueWidth(for band: HSLColorBand) -> Double {
+    nonisolated private func effectiveHueSpan(for band: HSLColorBand, adjustment: HSLBandAdjustment) -> HueBandSpan {
+        let baseSpan = baseHueSpan(for: band)
+        let effectStrength = max(
+            abs(adjustment.hueShift) / PhotoEffectSettings.hslHueRange.upperBound,
+            max(
+                abs(adjustment.saturationDelta),
+                abs(adjustment.lightnessDelta) / PhotoEffectSettings.hslLightnessRange.upperBound
+            )
+        )
+
+        let bandBias: Double
         switch band {
-        case .red: return 32
-        case .orange: return 26
-        case .yellow: return 24
-        case .green: return 28
-        case .aqua: return 26
-        case .blue: return 28
-        case .purple: return 24
-        case .magenta: return 26
+        case .yellow, .green, .aqua:
+            bandBias = 1.24
+        default:
+            bandBias = 1.0
         }
+
+        let growth = 1 + (0.72 * effectStrength)
+        return HueBandSpan(
+            center: baseSpan.center,
+            leftWidth: baseSpan.leftWidth * bandBias * growth,
+            rightWidth: baseSpan.rightWidth * bandBias * growth,
+            supportMultiplier: baseSpan.supportMultiplier,
+            falloffExponent: baseSpan.falloffExponent
+        )
     }
 
-    nonisolated private func hueBandWeight(hue: Double, center: Double, width: Double) -> Double {
-        let d = angularDistance(a: hue, b: center)
-        if d >= width { return 0 }
-        let normalized = 1 - (d / width)
-        let squared = normalized * normalized
-        return squared * squared
+    nonisolated private func hueBandWeight(hue: Double, span: HueBandSpan) -> Double {
+        let signedDistance = signedAngularDistance(from: span.center, to: hue)
+        let width = signedDistance < 0 ? span.leftWidth : span.rightWidth
+        let supportWidth = width * span.supportMultiplier
+        let distance = abs(signedDistance)
+        if distance >= supportWidth { return 0 }
+
+        let normalized = 1 - (distance / supportWidth)
+        return pow(normalized, span.falloffExponent)
     }
 
     nonisolated private func angularDistance(a: Double, b: Double) -> Double {
         let diff = abs(a - b).truncatingRemainder(dividingBy: 360)
         return min(diff, 360 - diff)
+    }
+
+    nonisolated private func signedAngularDistance(from center: Double, to hue: Double) -> Double {
+        var diff = (hue - center).truncatingRemainder(dividingBy: 360)
+        if diff > 180 { diff -= 360 }
+        if diff < -180 { diff += 360 }
+        return diff
     }
 
     nonisolated private func wrapHue(_ value: Double) -> Double {

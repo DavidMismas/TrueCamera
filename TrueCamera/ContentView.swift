@@ -5,6 +5,31 @@ import UniformTypeIdentifiers
 import UIKit
 
 struct ContentView: View {
+    private struct MainPresetStripItem: Identifiable {
+        let id: String
+        let title: String
+        let color: Color
+        let action: () -> Void
+    }
+
+    private enum EffectEditorGroup: String, CaseIterable, Hashable {
+        case base
+        case color
+        case colorGrading
+        case hslMix
+        case stylization
+
+        var title: String {
+            switch self {
+            case .base: return "Base"
+            case .color: return "Color"
+            case .colorGrading: return "Color Grading"
+            case .hslMix: return "HSL Mix"
+            case .stylization: return "Stylization"
+            }
+        }
+    }
+
     private enum CaptureProcessingStage: Int {
         case capturing
         case processing
@@ -107,6 +132,7 @@ struct ContentView: View {
     @State private var pendingCaptureJobs: [PendingCaptureJob] = []
     @State private var backgroundProcessorTask: Task<Void, Never>?
     @State private var backgroundProcessingInFlight = false
+    @State private var expandedEffectGroups: Set<EffectEditorGroup> = [.base]
     private let maxPendingBackgroundCaptures = 3
     private let themeTeal = Color(red: 0.07, green: 0.74, blue: 0.70)
     private let themePink = Color(red: 0.95, green: 0.54, blue: 0.75)
@@ -132,6 +158,56 @@ struct ContentView: View {
 
     private var hasReachedFreePresetLimit: Bool {
         !premiumManager.hasPremiumAccess && !cameraService.effectPresets.isEmpty
+    }
+
+    private var mainPresetStripItems: [MainPresetStripItem] {
+        var items: [MainPresetStripItem] = [
+            MainPresetStripItem(
+                id: PhotoEffectLibrary.customPresetID,
+                title: "Original",
+                color: themeTeal,
+                action: { cameraService.resetEffectsToNeutral() }
+            )
+        ]
+
+        items.append(
+            contentsOf: visibleEffectPresets.map { preset in
+                MainPresetStripItem(
+                    id: preset.id,
+                    title: shortPresetTitle(preset.name),
+                    color: presetDisplayColor(for: preset),
+                    action: { cameraService.applyEffectPreset(preset) }
+                )
+            }
+        )
+
+        return items
+    }
+
+    private var effectPresetSelectionBinding: Binding<String> {
+        Binding(
+            get: { cameraService.selectedEffectPresetID },
+            set: { nextValue in
+                if nextValue == PhotoEffectLibrary.customPresetID {
+                    cameraService.resetEffectsToNeutral()
+                } else if let preset = cameraService.effectPresets.first(where: { $0.id == nextValue }) {
+                    cameraService.applyEffectPreset(preset)
+                }
+                scheduleReferenceRender()
+            }
+        )
+    }
+
+    private var selectedPresetDisplayColorBinding: Binding<Color> {
+        Binding(
+            get: {
+                guard let selectedUserPreset else { return themeTeal }
+                return presetDisplayColor(for: selectedUserPreset)
+            },
+            set: { nextValue in
+                cameraService.updateSelectedPresetDisplayColor(presetDisplayColorModel(from: nextValue))
+            }
+        )
     }
 
     private var resolutionCapBinding: Binding<PhotoResolutionCap> {
@@ -383,24 +459,37 @@ struct ContentView: View {
     private var presetStrip: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    presetIcon(title: "Original", symbol: "camera", isSelected: cameraService.selectedEffectPresetID == PhotoEffectLibrary.customPresetID) {
-                        cameraService.resetEffectsToNeutral()
-                    }
-                    .id(presetScrollTargetID(for: PhotoEffectLibrary.customPresetID))
-
-                    ForEach(visibleEffectPresets) { preset in
-                        presetIcon(
-                            title: shortPresetTitle(preset.name),
-                            symbol: "camera.filters",
-                            isSelected: cameraService.selectedEffectPresetID == preset.id
-                        ) {
-                            cameraService.applyEffectPreset(preset)
+                HStack(spacing: 0) {
+                    ForEach(Array(mainPresetStripItems.enumerated()), id: \.element.id) { index, item in
+                        if index > 0 {
+                            Text("|")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(themeTextSecondary.opacity(0.65))
+                                .padding(.horizontal, 4)
                         }
-                        .id(presetScrollTargetID(for: preset.id))
+
+                        Button(action: item.action) {
+                            Text(item.title)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(
+                                    cameraService.selectedEffectPresetID == item.id
+                                        ? item.color
+                                        : item.color.opacity(0.8)
+                                )
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(.plain)
+                        .id(presetScrollTargetID(for: item.id))
+                        .overlay(alignment: .bottom) {
+                            Capsule()
+                                .fill(cameraService.selectedEffectPresetID == item.id ? item.color : .clear)
+                                .frame(height: 2)
+                                .offset(y: 6)
+                        }
                     }
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
             }
             .onAppear {
                 DispatchQueue.main.async {
@@ -984,27 +1073,18 @@ struct ContentView: View {
 
                 Form {
                     Section("Presets") {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                presetIcon(
-                                    title: "Original",
-                                    symbol: "camera",
-                                    isSelected: cameraService.selectedEffectPresetID == PhotoEffectLibrary.customPresetID
-                                ) {
-                                    cameraService.resetEffectsToNeutral()
-                                    scheduleReferenceRender()
-                                }
-                                ForEach(visibleEffectPresets) { preset in
-                                    presetIcon(
-                                        title: shortPresetTitle(preset.name),
-                                        symbol: "camera.filters",
-                                        isSelected: cameraService.selectedEffectPresetID == preset.id
-                                    ) {
-                                        cameraService.applyEffectPreset(preset)
-                                        scheduleReferenceRender()
-                                    }
-                                }
+                        Picker("Preset", selection: effectPresetSelectionBinding) {
+                            Text("Original")
+                                .tag(PhotoEffectLibrary.customPresetID)
+                            ForEach(visibleEffectPresets) { preset in
+                                Text(preset.name)
+                                    .tag(preset.id)
                             }
+                        }
+                        .pickerStyle(.menu)
+
+                        if selectedUserPreset != nil {
+                            ColorPicker("Preset Color", selection: selectedPresetDisplayColorBinding, supportsOpacity: false)
                         }
 
                         HStack(spacing: 10) {
@@ -1039,7 +1119,11 @@ struct ContentView: View {
 
                         ForEach(visibleEffectPresets) { preset in
                             HStack {
+                                Circle()
+                                    .fill(presetDisplayColor(for: preset))
+                                    .frame(width: 10, height: 10)
                                 Text(preset.name)
+                                    .foregroundStyle(presetDisplayColor(for: preset))
                                     .lineLimit(1)
                                 Spacer()
                                 if cameraService.selectedEffectPresetID == preset.id {
@@ -1056,7 +1140,7 @@ struct ContentView: View {
                         }
                     }
 
-                    Section("Base") {
+                    collapsibleEffectsSection(.base) {
                         effectSlider(
                             title: "Base Exposure",
                             value: effectBinding(\.baseExposure),
@@ -1109,7 +1193,7 @@ struct ContentView: View {
                         )
                     }
 
-                    Section("Color") {
+                    collapsibleEffectsSection(.color) {
                         effectSlider(
                             title: "Saturation",
                             value: effectBinding(\.saturation),
@@ -1120,24 +1204,23 @@ struct ContentView: View {
                             value: effectBinding(\.vibrance),
                             range: PhotoEffectSettings.vibranceRange
                         )
-                    }
-
-                    Section("White Balance") {
                         effectSlider(
                             title: "Warmth",
                             value: effectBinding(\.warmth),
                             range: PhotoEffectSettings.warmthRange,
-                            decimals: 0
+                            decimals: 0,
+                            tint: warmthTintColor(value: cameraService.effectSettings.warmth)
                         )
                         effectSlider(
                             title: "Tint",
                             value: effectBinding(\.tint),
                             range: PhotoEffectSettings.tintRange,
-                            decimals: 0
+                            decimals: 0,
+                            tint: tintAdjustmentColor(value: cameraService.effectSettings.tint)
                         )
                     }
 
-                    Section("Color Grading") {
+                    collapsibleEffectsSection(.colorGrading) {
                         effectSlider(
                             title: "Global Hue",
                             value: colorGradeBinding(\.global, \.hue),
@@ -1188,7 +1271,7 @@ struct ContentView: View {
                         )
                     }
 
-                    Section("HSL Mix") {
+                    collapsibleEffectsSection(.hslMix) {
                         ForEach(HSLColorBand.allCases) { band in
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(band.title)
@@ -1196,24 +1279,27 @@ struct ContentView: View {
                                 effectSlider(
                                     title: "Hue",
                                     value: hslBinding(for: band, \.hueShift),
-                                    range: PhotoEffectSettings.hslHueRange
+                                    range: PhotoEffectSettings.hslHueRange,
+                                    tint: hslHueTintColor(for: band, shift: cameraService.effectSettings.hsl[band].hueShift)
                                 )
                                 effectSlider(
                                     title: "Saturation",
                                     value: hslBinding(for: band, \.saturationDelta),
-                                    range: PhotoEffectSettings.hslSaturationRange
+                                    range: PhotoEffectSettings.hslSaturationRange,
+                                    tint: hslSaturationTintColor(for: band, delta: cameraService.effectSettings.hsl[band].saturationDelta)
                                 )
                                 effectSlider(
                                     title: "Luminance",
                                     value: hslBinding(for: band, \.lightnessDelta),
-                                    range: PhotoEffectSettings.hslLightnessRange
+                                    range: PhotoEffectSettings.hslLightnessRange,
+                                    tint: hslLuminanceTintColor(for: band, delta: cameraService.effectSettings.hsl[band].lightnessDelta)
                                 )
                             }
                             .padding(.vertical, 4)
                         }
                     }
 
-                    Section("Stylization") {
+                    collapsibleEffectsSection(.stylization) {
                         effectSlider(
                             title: "Bloom Intensity",
                             value: effectBinding(\.bloomIntensity),
@@ -1395,6 +1481,44 @@ struct ContentView: View {
         )
     }
 
+    @ViewBuilder
+    private func collapsibleEffectsSection<Content: View>(
+        _ group: EffectEditorGroup,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Section {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    toggleEffectsGroup(group)
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Text(group.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(themePink.opacity(0.96))
+                    Spacer()
+                    Image(systemName: expandedEffectGroups.contains(group) ? "chevron.down.circle.fill" : "chevron.right.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(themeTeal)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expandedEffectGroups.contains(group) {
+                content()
+            }
+        }
+    }
+
+    private func toggleEffectsGroup(_ group: EffectEditorGroup) {
+        if expandedEffectGroups.contains(group) {
+            expandedEffectGroups.remove(group)
+        } else {
+            expandedEffectGroups = [group]
+        }
+    }
+
     private func effectSlider(
         title: String,
         value: Binding<Double>,
@@ -1471,9 +1595,136 @@ struct ContentView: View {
     }
 
     private func gradeTintColor(hue: Double) -> Color {
-        let degrees = hue.truncatingRemainder(dividingBy: 360)
-        let normalized = (degrees < 0 ? degrees + 360 : degrees) / 360
+        let normalized = normalizedHueUnit(hue)
         return Color(hue: normalized, saturation: 0.9, brightness: 0.95)
+    }
+
+    private func presetDisplayColor(for preset: PhotoEffectPreset) -> Color {
+        guard let displayColor = preset.displayColor?.clamped() else { return themeTeal }
+        return Color(red: displayColor.red, green: displayColor.green, blue: displayColor.blue)
+    }
+
+    private func presetDisplayColorModel(from color: Color) -> PresetDisplayColor {
+        let uiColor = UIColor(color)
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+
+        guard uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
+            return PresetDisplayColor(red: 0.07, green: 0.74, blue: 0.70)
+        }
+
+        return PresetDisplayColor(
+            red: Double(red),
+            green: Double(green),
+            blue: Double(blue)
+        )
+    }
+
+    private func warmthTintColor(value: Double) -> Color {
+        let neutral = UIColor(themeTextSecondary.opacity(0.9))
+        let cool = UIColor(red: 0.35, green: 0.72, blue: 0.98, alpha: 1)
+        let warm = UIColor(red: 1.0, green: 0.63, blue: 0.24, alpha: 1)
+        let progress = normalizedUnit(value, in: PhotoEffectSettings.warmthRange)
+
+        if progress < 0.5 {
+            return interpolateColor(from: cool, to: neutral, progress: progress / 0.5)
+        }
+
+        return interpolateColor(from: neutral, to: warm, progress: (progress - 0.5) / 0.5)
+    }
+
+    private func tintAdjustmentColor(value: Double) -> Color {
+        let neutral = UIColor(themeTextSecondary.opacity(0.9))
+        let green = UIColor(red: 0.34, green: 0.86, blue: 0.58, alpha: 1)
+        let magenta = UIColor(red: 0.96, green: 0.47, blue: 0.82, alpha: 1)
+        let progress = normalizedUnit(value, in: PhotoEffectSettings.tintRange)
+
+        if progress < 0.5 {
+            return interpolateColor(from: green, to: neutral, progress: progress / 0.5)
+        }
+
+        return interpolateColor(from: neutral, to: magenta, progress: (progress - 0.5) / 0.5)
+    }
+
+    private func hslHueTintColor(for band: HSLColorBand, shift: Double) -> Color {
+        hslBandColor(for: band, hueShift: shift, saturation: 0.92, brightness: 0.96)
+    }
+
+    private func hslSaturationTintColor(for band: HSLColorBand, delta: Double) -> Color {
+        let progress = normalizedUnit(delta, in: PhotoEffectSettings.hslSaturationRange)
+        let saturation = 0.18 + (progress * 0.78)
+        let brightness = 0.76 + (progress * 0.2)
+        return hslBandColor(for: band, saturation: saturation, brightness: brightness)
+    }
+
+    private func hslLuminanceTintColor(for band: HSLColorBand, delta: Double) -> Color {
+        let progress = normalizedUnit(delta, in: PhotoEffectSettings.hslLightnessRange)
+        let saturation = 0.92 - (progress * 0.28)
+        let brightness = 0.42 + (progress * 0.54)
+        return hslBandColor(for: band, saturation: saturation, brightness: brightness)
+    }
+
+    private func hslBandColor(
+        for band: HSLColorBand,
+        hueShift: Double = 0,
+        saturation: Double = 0.9,
+        brightness: Double = 0.95
+    ) -> Color {
+        let normalized = normalizedHueUnit(hslBandBaseHueDegrees(for: band) + hueShift)
+        return Color(hue: normalized, saturation: saturation, brightness: brightness)
+    }
+
+    private func hslBandBaseHueDegrees(for band: HSLColorBand) -> Double {
+        switch band {
+        case .red: return 0
+        case .orange: return 28
+        case .yellow: return 56
+        case .green: return 122
+        case .aqua: return 182
+        case .blue: return 220
+        case .purple: return 276
+        case .magenta: return 320
+        }
+    }
+
+    private func normalizedHueUnit(_ hue: Double) -> Double {
+        let degrees = hue.truncatingRemainder(dividingBy: 360)
+        return (degrees < 0 ? degrees + 360 : degrees) / 360
+    }
+
+    private func normalizedUnit(_ value: Double, in range: ClosedRange<Double>) -> Double {
+        let span = range.upperBound - range.lowerBound
+        guard span > 0 else { return 0 }
+        let clamped = min(max(value, range.lowerBound), range.upperBound)
+        return (clamped - range.lowerBound) / span
+    }
+
+    private func interpolateColor(from start: UIColor, to end: UIColor, progress: Double) -> Color {
+        let clamped = min(max(progress, 0), 1)
+
+        var startRed: CGFloat = 0
+        var startGreen: CGFloat = 0
+        var startBlue: CGFloat = 0
+        var startAlpha: CGFloat = 0
+        var endRed: CGFloat = 0
+        var endGreen: CGFloat = 0
+        var endBlue: CGFloat = 0
+        var endAlpha: CGFloat = 0
+
+        guard start.getRed(&startRed, green: &startGreen, blue: &startBlue, alpha: &startAlpha),
+              end.getRed(&endRed, green: &endGreen, blue: &endBlue, alpha: &endAlpha) else {
+            return Color(uiColor: end)
+        }
+
+        let inverse = 1 - clamped
+        return Color(
+            red: Double((startRed * inverse) + (endRed * clamped)),
+            green: Double((startGreen * inverse) + (endGreen * clamped)),
+            blue: Double((startBlue * inverse) + (endBlue * clamped)),
+            opacity: Double((startAlpha * inverse) + (endAlpha * clamped))
+        )
     }
 
     private func shortPresetTitle(_ name: String) -> String {

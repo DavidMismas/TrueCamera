@@ -185,7 +185,7 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     static let grainAmountRange: ClosedRange<Double> = 0...0.22
     static let grainSizeRange: ClosedRange<Double> = 0.6...2.2
 
-    static let hslHueRange: ClosedRange<Double> = -35...35
+    static let hslHueRange: ClosedRange<Double> = -70...70
     static let hslSaturationRange: ClosedRange<Double> = -1.0...1.0
     static let hslLightnessRange: ClosedRange<Double> = -0.35...0.35
     static let colorGradeHueRange: ClosedRange<Double> = -180...180
@@ -345,6 +345,21 @@ nonisolated struct PhotoEffectPreset: Identifiable, Equatable, Hashable, Codable
     let id: String
     var name: String
     var settings: PhotoEffectSettings
+    var displayColor: PresetDisplayColor?
+}
+
+nonisolated struct PresetDisplayColor: Equatable, Hashable, Codable, Sendable {
+    var red: Double
+    var green: Double
+    var blue: Double
+
+    func clamped() -> PresetDisplayColor {
+        PresetDisplayColor(
+            red: min(max(red, 0), 1),
+            green: min(max(green, 0), 1),
+            blue: min(max(blue, 0), 1)
+        )
+    }
 }
 
 nonisolated enum PhotoEffectLibrary {

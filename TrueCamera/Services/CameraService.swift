@@ -574,7 +574,8 @@ final class CameraService: NSObject, ObservableObject {
         let preset = PhotoEffectPreset(
             id: UUID().uuidString,
             name: resolvedName,
-            settings: effectSettings.clamped()
+            settings: effectSettings.clamped(),
+            displayColor: nil
         )
         effectPresets.append(preset)
         selectedEffectPresetID = preset.id
@@ -584,6 +585,13 @@ final class CameraService: NSObject, ObservableObject {
         guard let selectedIndex = effectPresets.firstIndex(where: { $0.id == selectedEffectPresetID }) else { return }
         var nextPresets = effectPresets
         nextPresets[selectedIndex].settings = effectSettings.clamped()
+        effectPresets = nextPresets
+    }
+
+    func updateSelectedPresetDisplayColor(_ displayColor: PresetDisplayColor?) {
+        guard let selectedIndex = effectPresets.firstIndex(where: { $0.id == selectedEffectPresetID }) else { return }
+        var nextPresets = effectPresets
+        nextPresets[selectedIndex].displayColor = displayColor?.clamped()
         effectPresets = nextPresets
     }
 
@@ -1330,6 +1338,7 @@ final class CameraService: NSObject, ObservableObject {
                 var sanitized = preset
                 sanitized.name = sanitized.name.trimmingCharacters(in: .whitespacesAndNewlines)
                 sanitized.settings = sanitized.settings.clamped()
+                sanitized.displayColor = sanitized.displayColor?.clamped()
                 if sanitized.name.isEmpty { sanitized.name = "Preset" }
                 return sanitized
             }

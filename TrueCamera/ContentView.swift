@@ -1078,6 +1078,26 @@ struct ContentView: View {
                             range: PhotoEffectSettings.shadowsRange
                         )
                         effectSlider(
+                            title: "Whites",
+                            value: effectBinding(\.whites),
+                            range: PhotoEffectSettings.whitesRange
+                        )
+                        effectSlider(
+                            title: "Blacks",
+                            value: effectBinding(\.blacks),
+                            range: PhotoEffectSettings.blacksRange
+                        )
+                        effectSlider(
+                            title: "White Fade",
+                            value: effectBinding(\.whiteFade),
+                            range: PhotoEffectSettings.whiteFadeRange
+                        )
+                        effectSlider(
+                            title: "Black Fade",
+                            value: effectBinding(\.blackFade),
+                            range: PhotoEffectSettings.blackFadeRange
+                        )
+                        effectSlider(
                             title: "Clarity",
                             value: effectBinding(\.clarity),
                             range: PhotoEffectSettings.clarityRange
@@ -1141,6 +1161,18 @@ struct ContentView: View {
                             value: colorGradeBinding(\.shadows, \.amount),
                             range: PhotoEffectSettings.colorGradeAmountRange,
                             tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.shadows.hue)
+                        )
+                        effectSlider(
+                            title: "Midtones Hue",
+                            value: colorGradeBinding(\.midtones, \.hue),
+                            range: PhotoEffectSettings.colorGradeHueRange,
+                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.midtones.hue)
+                        )
+                        effectSlider(
+                            title: "Midtones Amount",
+                            value: colorGradeBinding(\.midtones, \.amount),
+                            range: PhotoEffectSettings.colorGradeAmountRange,
+                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.midtones.hue)
                         )
                         effectSlider(
                             title: "Highlights Hue",

@@ -80,15 +80,47 @@ nonisolated struct ColorGradeTone: Equatable, Hashable, Codable, Sendable {
 nonisolated struct ColorGradingSettings: Equatable, Hashable, Codable, Sendable {
     var global = ColorGradeTone()
     var shadows = ColorGradeTone()
+    var midtones = ColorGradeTone()
     var highlights = ColorGradeTone()
 
     static let neutral = ColorGradingSettings()
+}
+
+extension ColorGradingSettings {
+    private enum CodingKeys: String, CodingKey {
+        case global
+        case shadows
+        case midtones
+        case highlights
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = Self.neutral
+
+        global = try container.decodeIfPresent(ColorGradeTone.self, forKey: .global) ?? defaults.global
+        shadows = try container.decodeIfPresent(ColorGradeTone.self, forKey: .shadows) ?? defaults.shadows
+        midtones = try container.decodeIfPresent(ColorGradeTone.self, forKey: .midtones) ?? defaults.midtones
+        highlights = try container.decodeIfPresent(ColorGradeTone.self, forKey: .highlights) ?? defaults.highlights
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(global, forKey: .global)
+        try container.encode(shadows, forKey: .shadows)
+        try container.encode(midtones, forKey: .midtones)
+        try container.encode(highlights, forKey: .highlights)
+    }
 }
 
 nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     var baseExposure: Double
     var highlights: Double
     var shadows: Double
+    var whites: Double
+    var blacks: Double
+    var whiteFade: Double
+    var blackFade: Double
     /// Contrast percentage offset where 0 = neutral (actual contrast = 1 + contrast / 100).
     var contrast: Double
     /// Saturation offset where 0 = neutral (actual saturation = 1 + saturation).
@@ -111,6 +143,10 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
         baseExposure: 0,
         highlights: 0,
         shadows: 0,
+        whites: 0,
+        blacks: 0,
+        whiteFade: 0,
+        blackFade: 0,
         contrast: 0,
         saturation: 0,
         vibrance: 0,
@@ -131,6 +167,10 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     static let baseExposureRange: ClosedRange<Double> = -2.0...2.0
     static let highlightsRange: ClosedRange<Double> = -1.0...1.0
     static let shadowsRange: ClosedRange<Double> = -1.0...1.0
+    static let whitesRange: ClosedRange<Double> = -1.0...1.0
+    static let blacksRange: ClosedRange<Double> = -1.0...1.0
+    static let whiteFadeRange: ClosedRange<Double> = 0...1.0
+    static let blackFadeRange: ClosedRange<Double> = 0...1.0
     static let contrastRange: ClosedRange<Double> = -20...20
     static let saturationRange: ClosedRange<Double> = -1.0...0.7
     static let vibranceRange: ClosedRange<Double> = -1.0...0.5
@@ -175,6 +215,10 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
         result.baseExposure = clamp(result.baseExposure, to: Self.baseExposureRange)
         result.highlights = clamp(result.highlights, to: Self.highlightsRange)
         result.shadows = clamp(result.shadows, to: Self.shadowsRange)
+        result.whites = clamp(result.whites, to: Self.whitesRange)
+        result.blacks = clamp(result.blacks, to: Self.blacksRange)
+        result.whiteFade = clamp(result.whiteFade, to: Self.whiteFadeRange)
+        result.blackFade = clamp(result.blackFade, to: Self.blackFadeRange)
         result.contrast = clamp(result.contrast, to: Self.contrastRange)
         result.saturation = clamp(result.saturation, to: Self.saturationRange)
         result.vibrance = clamp(result.vibrance, to: Self.vibranceRange)
@@ -200,6 +244,7 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
 
         result.colorGrading.global = clampedTone(result.colorGrading.global)
         result.colorGrading.shadows = clampedTone(result.colorGrading.shadows)
+        result.colorGrading.midtones = clampedTone(result.colorGrading.midtones)
         result.colorGrading.highlights = clampedTone(result.colorGrading.highlights)
         return result
     }
@@ -220,6 +265,10 @@ extension PhotoEffectSettings {
         case baseExposure
         case highlights
         case shadows
+        case whites
+        case blacks
+        case whiteFade
+        case blackFade
         case contrast
         case saturation
         case vibrance
@@ -244,6 +293,10 @@ extension PhotoEffectSettings {
         baseExposure = try container.decodeIfPresent(Double.self, forKey: .baseExposure) ?? defaults.baseExposure
         highlights = try container.decodeIfPresent(Double.self, forKey: .highlights) ?? defaults.highlights
         shadows = try container.decodeIfPresent(Double.self, forKey: .shadows) ?? defaults.shadows
+        whites = try container.decodeIfPresent(Double.self, forKey: .whites) ?? defaults.whites
+        blacks = try container.decodeIfPresent(Double.self, forKey: .blacks) ?? defaults.blacks
+        whiteFade = try container.decodeIfPresent(Double.self, forKey: .whiteFade) ?? defaults.whiteFade
+        blackFade = try container.decodeIfPresent(Double.self, forKey: .blackFade) ?? defaults.blackFade
         contrast = try container.decodeIfPresent(Double.self, forKey: .contrast) ?? defaults.contrast
         saturation = try container.decodeIfPresent(Double.self, forKey: .saturation) ?? defaults.saturation
         vibrance = try container.decodeIfPresent(Double.self, forKey: .vibrance) ?? defaults.vibrance
@@ -266,6 +319,10 @@ extension PhotoEffectSettings {
         try container.encode(baseExposure, forKey: .baseExposure)
         try container.encode(highlights, forKey: .highlights)
         try container.encode(shadows, forKey: .shadows)
+        try container.encode(whites, forKey: .whites)
+        try container.encode(blacks, forKey: .blacks)
+        try container.encode(whiteFade, forKey: .whiteFade)
+        try container.encode(blackFade, forKey: .blackFade)
         try container.encode(contrast, forKey: .contrast)
         try container.encode(saturation, forKey: .saturation)
         try container.encode(vibrance, forKey: .vibrance)

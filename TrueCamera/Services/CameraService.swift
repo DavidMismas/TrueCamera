@@ -1135,6 +1135,10 @@ final class CameraService: NSObject, ObservableObject {
         abs(settings.baseExposure) < 0.0001 &&
             abs(settings.highlights) < 0.0001 &&
             abs(settings.shadows) < 0.0001 &&
+            abs(settings.whites) < 0.0001 &&
+            abs(settings.blacks) < 0.0001 &&
+            settings.whiteFade < 0.0001 &&
+            settings.blackFade < 0.0001 &&
             abs(settings.contrast) < 0.0001 &&
             abs(settings.saturation) < 0.0001 &&
             abs(settings.vibrance) < 0.0001 &&

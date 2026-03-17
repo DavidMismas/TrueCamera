@@ -150,6 +150,10 @@ final class PhotoEffectsProcessor {
         abs(settings.baseExposure) < 0.0001 &&
             abs(settings.highlights) < 0.0001 &&
             abs(settings.shadows) < 0.0001 &&
+            abs(settings.whites) < 0.0001 &&
+            abs(settings.blacks) < 0.0001 &&
+            settings.whiteFade < 0.0001 &&
+            settings.blackFade < 0.0001 &&
             abs(settings.contrast) < 0.0001 &&
             abs(settings.saturation) < 0.0001 &&
             abs(settings.vibrance) < 0.0001 &&
@@ -315,6 +319,19 @@ final class PhotoEffectsProcessor {
             }
         }
 
+        if abs(settings.whites) > 0.0001 ||
+            abs(settings.blacks) > 0.0001 ||
+            settings.whiteFade > 0.0001 ||
+            settings.blackFade > 0.0001 {
+            output = applyWhiteBlackPoint(
+                whites: settings.whites,
+                blacks: settings.blacks,
+                whiteFade: settings.whiteFade,
+                blackFade: settings.blackFade,
+                to: output
+            )
+        }
+
         if abs(settings.contrast) > 0.0001 {
             output = applyPerceptualContrast(settings.contrast, to: output)
         }
@@ -401,6 +418,10 @@ final class PhotoEffectsProcessor {
         abs(settings.baseExposure) > 0.0001 ||
             abs(settings.highlights) > 0.0001 ||
             abs(settings.shadows) > 0.0001 ||
+            abs(settings.whites) > 0.0001 ||
+            abs(settings.blacks) > 0.0001 ||
+            settings.whiteFade > 0.0001 ||
+            settings.blackFade > 0.0001 ||
             abs(settings.saturation) > 0.0001 ||
             abs(settings.vibrance) > 0.0001 ||
             abs(settings.warmth) > 0.5 ||
@@ -468,9 +489,76 @@ final class PhotoEffectsProcessor {
         return output.cropped(to: image.extent)
     }
 
+    nonisolated private func applyWhiteBlackPoint(
+        whites: Double,
+        blacks: Double,
+        whiteFade: Double,
+        blackFade: Double,
+        to image: CIImage
+    ) -> CIImage {
+        var output = image
+
+        // Shape endpoints in perceptual space so the controls behave like photographic white/black sliders.
+        if let toSRGB = CIFilter(name: "CILinearToSRGBToneCurve") {
+            toSRGB.setValue(output, forKey: kCIInputImageKey)
+            if let converted = toSRGB.outputImage {
+                output = converted
+            }
+        }
+
+        if let toneCurve = CIFilter(name: "CIToneCurve") {
+            let blacksLift = max(blacks, 0)
+            let blacksDepth = max(-blacks, 0)
+            let whitesLift = max(whites, 0)
+            let whitesCompression = max(-whites, 0)
+            let blackFadeAmount = clamp(blackFade, 0, 1)
+            let whiteFadeAmount = clamp(whiteFade, 0, 1)
+
+            // Positive blacks should open deep shadow detail without creating a matte black floor.
+            // Keep the absolute black point pinned close to zero; reshape the toe above it instead.
+            let point0Y = clamp((0.006 * whitesLift) + (0.085 * blackFadeAmount), 0, 1)
+            let point1X = 0.20
+            let point1Y = clamp(0.20 + (0.110 * blacksLift) - (0.075 * blacksDepth) + (0.070 * blackFadeAmount), 0, 1)
+            let point2Y = clamp(
+                0.50 +
+                    (0.012 * whitesLift) +
+                    (0.020 * blacksLift) -
+                    (0.008 * whitesCompression) -
+                    (0.016 * blacksDepth) +
+                    (0.010 * blackFadeAmount) -
+                    (0.010 * whiteFadeAmount),
+                0,
+                1
+            )
+            let point3X = 0.80
+            let point3Y = clamp(0.80 + (0.085 * whitesLift) - (0.060 * whitesCompression) - (0.070 * whiteFadeAmount), 0, 1)
+            let point4Y = clamp(1.0 + (0.045 * whitesLift) - (0.070 * whitesCompression) - (0.110 * whiteFadeAmount), 0, 1)
+
+            toneCurve.setValue(output, forKey: kCIInputImageKey)
+            toneCurve.setValue(CIVector(x: 0.00, y: point0Y), forKey: "inputPoint0")
+            toneCurve.setValue(CIVector(x: point1X, y: point1Y), forKey: "inputPoint1")
+            toneCurve.setValue(CIVector(x: 0.50, y: point2Y), forKey: "inputPoint2")
+            toneCurve.setValue(CIVector(x: point3X, y: point3Y), forKey: "inputPoint3")
+            toneCurve.setValue(CIVector(x: 1.00, y: point4Y), forKey: "inputPoint4")
+            if let curved = toneCurve.outputImage {
+                output = curved
+            }
+        }
+
+        if let toLinear = CIFilter(name: "CISRGBToneCurveToLinear") {
+            toLinear.setValue(output, forKey: kCIInputImageKey)
+            if let converted = toLinear.outputImage {
+                output = converted
+            }
+        }
+
+        return output.cropped(to: image.extent)
+    }
+
     nonisolated private func shouldApplyColorCube(for settings: PhotoEffectSettings) -> Bool {
         if settings.colorGrading.global.amount > 0.0001 ||
             settings.colorGrading.shadows.amount > 0.0001 ||
+            settings.colorGrading.midtones.amount > 0.0001 ||
             settings.colorGrading.highlights.amount > 0.0001 {
             return true
         }
@@ -714,6 +802,9 @@ final class PhotoEffectsProcessor {
         let shadowDetailGuard = smoothstep(0.03, 0.13, luminance)
         let shadowProtectedWeight = shadowChromaWeight * shadowDeepToneGuard * shadowDetailGuard * highlightGuard
         let shadowWeight = 1 - smoothstep(0.16, 0.50, luminance)
+        let midtoneEntry = smoothstep(0.18, 0.38, luminance)
+        let midtoneExit = 1 - smoothstep(0.60, 0.82, luminance)
+        let midtoneWeight = midtoneEntry * midtoneExit
         let highlightWeight = smoothstep(0.45, 0.88, luminance)
 
         if grading.shadows.amount > 0.0001 {
@@ -721,6 +812,13 @@ final class PhotoEffectsProcessor {
                 output,
                 toward: hueToneColor(grading.shadows.hue, saturation: 0.68 + (0.32 * chromaWeight)),
                 t: grading.shadows.amount * shadowWeight * 0.62 * shadowProtectedWeight
+            )
+        }
+        if grading.midtones.amount > 0.0001 {
+            output = toneBand(
+                output,
+                toward: hueToneColor(grading.midtones.hue, saturation: 0.62 + (0.22 * chromaWeight)),
+                t: grading.midtones.amount * midtoneWeight * 0.44 * protectedWeight
             )
         }
         if grading.highlights.amount > 0.0001 {
@@ -742,6 +840,7 @@ final class PhotoEffectsProcessor {
         guard settings.hsl == .neutral else { return false }
         return settings.colorGrading.global.amount > 0.0001 ||
             settings.colorGrading.shadows.amount > 0.0001 ||
+            settings.colorGrading.midtones.amount > 0.0001 ||
             settings.colorGrading.highlights.amount > 0.0001
     }
 

@@ -5,14 +5,14 @@ import UniformTypeIdentifiers
 import UIKit
 
 struct ContentView: View {
-    private struct MainPresetStripItem: Identifiable {
+    struct MainPresetStripItem: Identifiable {
         let id: String
         let title: String
         let color: Color
         let action: () -> Void
     }
 
-    private enum EffectEditorGroup: String, CaseIterable, Hashable {
+    enum EffectEditorGroup: String, CaseIterable, Hashable {
         case base
         case color
         case colorGrading
@@ -30,7 +30,7 @@ struct ContentView: View {
         }
     }
 
-    private enum CaptureProcessingStage: Int {
+    enum CaptureProcessingStage: Int {
         case capturing
         case processing
         case saving
@@ -88,7 +88,7 @@ struct ContentView: View {
         }
     }
 
-    private struct CaptureRequestContext {
+    struct CaptureRequestContext {
         let effectSettings: PhotoEffectSettings
         let heifBitDepth: StyledHEIFBitDepth
         let heifCompressionQuality: Double
@@ -96,50 +96,50 @@ struct ContentView: View {
         let saveRAWToLibrary: Bool
     }
 
-    private struct PendingCaptureJob: Identifiable {
+    struct PendingCaptureJob: Identifiable {
         let id = UUID()
         let rawData: Data?
         let processedData: Data?
         let requestContext: CaptureRequestContext
     }
 
-    private static let editorReferenceImage: UIImage? = loadEditorReferenceImage()
-    nonisolated private static let referencePreviewProcessor = PhotoEffectsProcessor()
-    nonisolated private static let referenceRenderDebounceNanoseconds: UInt64 = 16_000_000
+    static let editorReferenceImage: UIImage? = loadEditorReferenceImage()
+    nonisolated static let referencePreviewProcessor = PhotoEffectsProcessor()
+    nonisolated static let referenceRenderDebounceNanoseconds: UInt64 = 16_000_000
     private static let queueFullStatusMessage = "Processing queue is full. Please wait a moment."
-    private static let editorReferenceMaxDimension: CGFloat = 2200
-    nonisolated private static let referencePreviewRenderDimension: CGFloat = 960
+    static let editorReferenceMaxDimension: CGFloat = 2200
+    nonisolated static let referencePreviewRenderDimension: CGFloat = 960
 
-    @StateObject private var cameraService = CameraService()
-    @EnvironmentObject private var premiumManager: PremiumManager
-    @Environment(\.scenePhase) private var scenePhase
+    @StateObject var cameraService = CameraService()
+    @EnvironmentObject var premiumManager: PremiumManager
+    @Environment(\.scenePhase) var scenePhase
 
-    @State private var statusMessage: String?
-    @State private var lastCaptureSucceeded = false
-    @State private var controlRotationAngle: Angle = .zero
-    @State private var showSettingsSheet = false
-    @State private var showEffectsSheet = false
-    @State private var showLensPicker = false
-    @State private var renderedReferenceImage: UIImage?
-    @State private var referenceRenderTask: Task<Void, Never>?
-    @State private var referenceRenderGeneration: UInt64 = 0
-    @State private var presetNameDraft = ""
-    @State private var captureProcessingStage: CaptureProcessingStage?
-    @State private var captureStageDismissTask: Task<Void, Never>?
-    @State private var processingSpinnerRotation: Double = 0
-    @State private var processingPulse = false
-    @State private var pendingCaptureRequestContext: CaptureRequestContext?
-    @State private var pendingCaptureJobs: [PendingCaptureJob] = []
-    @State private var backgroundProcessorTask: Task<Void, Never>?
-    @State private var backgroundProcessingInFlight = false
-    @State private var expandedEffectGroups: Set<EffectEditorGroup> = [.base]
-    private let maxPendingBackgroundCaptures = 3
-    private let themeTeal = Color(red: 0.07, green: 0.74, blue: 0.70)
-    private let themePink = Color(red: 0.95, green: 0.54, blue: 0.75)
-    private let themeTextPrimary = Color.white.opacity(0.94)
-    private let themeTextSecondary = Color(red: 0.82, green: 0.83, blue: 0.9)
-    private let themeBackgroundTop = Color(red: 0.06, green: 0.09, blue: 0.13)
-    private let themeBackgroundBottom = Color(red: 0.03, green: 0.05, blue: 0.08)
+    @State var statusMessage: String?
+    @State var lastCaptureSucceeded = false
+    @State var controlRotationAngle: Angle = .zero
+    @State var showSettingsSheet = false
+    @State var showEffectsSheet = false
+    @State var showLensPicker = false
+    @State var renderedReferenceImage: UIImage?
+    @State var referenceRenderTask: Task<Void, Never>?
+    @State var referenceRenderGeneration: UInt64 = 0
+    @State var presetNameDraft = ""
+    @State var captureProcessingStage: CaptureProcessingStage?
+    @State var captureStageDismissTask: Task<Void, Never>?
+    @State var processingSpinnerRotation: Double = 0
+    @State var processingPulse = false
+    @State var pendingCaptureRequestContext: CaptureRequestContext?
+    @State var pendingCaptureJobs: [PendingCaptureJob] = []
+    @State var backgroundProcessorTask: Task<Void, Never>?
+    @State var backgroundProcessingInFlight = false
+    @State var expandedEffectGroups: Set<EffectEditorGroup> = [.base]
+    let maxPendingBackgroundCaptures = 3
+    let themeTeal = Color(red: 0.07, green: 0.74, blue: 0.70)
+    let themePink = Color(red: 0.95, green: 0.54, blue: 0.75)
+    let themeTextPrimary = Color.white.opacity(0.94)
+    let themeTextSecondary = Color(red: 0.82, green: 0.83, blue: 0.9)
+    let themeBackgroundTop = Color(red: 0.06, green: 0.09, blue: 0.13)
+    let themeBackgroundBottom = Color(red: 0.03, green: 0.05, blue: 0.08)
     private let topControlsHorizontalPadding: CGFloat = 24
     private let exposureHorizontalPadding: CGFloat = 20
 
@@ -152,11 +152,11 @@ struct ContentView: View {
         pendingCaptureJobs.count + (backgroundProcessingInFlight ? 1 : 0)
     }
 
-    private var visibleEffectPresets: [PhotoEffectPreset] {
+    var visibleEffectPresets: [PhotoEffectPreset] {
         premiumManager.hasPremiumAccess ? cameraService.effectPresets : Array(cameraService.effectPresets.prefix(1))
     }
 
-    private var hasReachedFreePresetLimit: Bool {
+    var hasReachedFreePresetLimit: Bool {
         !premiumManager.hasPremiumAccess && !cameraService.effectPresets.isEmpty
     }
 
@@ -184,21 +184,9 @@ struct ContentView: View {
         return items
     }
 
-    private var effectPresetSelectionBinding: Binding<String> {
-        Binding(
-            get: { cameraService.selectedEffectPresetID },
-            set: { nextValue in
-                if nextValue == PhotoEffectLibrary.customPresetID {
-                    cameraService.resetEffectsToNeutral()
-                } else if let preset = cameraService.effectPresets.first(where: { $0.id == nextValue }) {
-                    cameraService.applyEffectPreset(preset)
-                }
-                scheduleReferenceRender()
-            }
-        )
-    }
 
-    private var selectedPresetDisplayColorBinding: Binding<Color> {
+
+    var selectedPresetDisplayColorBinding: Binding<Color> {
         Binding(
             get: {
                 guard let selectedUserPreset else { return themeTeal }
@@ -210,7 +198,7 @@ struct ContentView: View {
         )
     }
 
-    private var resolutionCapBinding: Binding<PhotoResolutionCap> {
+    var resolutionCapBinding: Binding<PhotoResolutionCap> {
         Binding(
             get: { cameraService.resolutionCap },
             set: { nextValue in
@@ -225,7 +213,7 @@ struct ContentView: View {
         )
     }
 
-    private var livePresetPreviewBinding: Binding<Bool> {
+    var livePresetPreviewBinding: Binding<Bool> {
         Binding(
             get: { premiumManager.hasPremiumAccess && cameraService.livePresetPreviewEnabled },
             set: { nextValue in
@@ -790,950 +778,6 @@ struct ContentView: View {
         .padding(20)
     }
 
-    // MARK: - Settings sheet
-
-    private var settingsSheet: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    if premiumManager.hasPremiumAccess {
-                        Label("Grejn Pro unlocked", systemImage: "checkmark.seal.fill")
-                            .foregroundStyle(themeTeal)
-                    } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Unlock full-resolution Apple ProRAW capture and unlimited saved presets.")
-                                .font(.subheadline)
-                            Button("Unlock Grejn Pro") {
-                                premiumManager.presentPaywall(for: .all)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(themeTeal)
-                        }
-                    }
-                } header: {
-                    Text("Grejn Pro")
-                }
-
-                Section("Sound & Haptics") {
-                    Toggle("Haptic Feedback", isOn: $cameraService.hapticsEnabled)
-                    if cameraService.isShutterSoundToggleAvailable {
-                        Toggle("Shutter Sound", isOn: $cameraService.shutterSoundEnabled)
-                        Picker("Shutter Tone", selection: $cameraService.shutterSoundProfile) {
-                            ForEach(CameraShutterSoundProfile.allCases) { tone in
-                                Text(tone.label).tag(tone)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .disabled(!cameraService.shutterSoundEnabled)
-                    }
-                }
-
-                Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Photo Priority")
-                            .font(.subheadline.weight(.semibold))
-                        Text("Choose whether the camera should save a little faster or spend more time getting the cleanest result.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Picker("Photo Priority", selection: $cameraService.capturePriority) {
-                            ForEach(PhotoCapturePriority.allCases) { option in
-                                Text(option.label).tag(option)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Max Resolution")
-                            .font(.subheadline.weight(.semibold))
-                        Text("Full keeps the most detail. 12 MP is quicker to save and uses less storage.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Picker("Max Resolution", selection: resolutionCapBinding) {
-                            ForEach(PhotoResolutionCap.allCases) { option in
-                                Text(option.label).tag(option)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-
-                        if !premiumManager.hasPremiumAccess {
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: "lock.fill")
-                                    .foregroundStyle(themePink.opacity(0.9))
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Full resolution is part of Grejn Pro.")
-                                        .font(.footnote.weight(.semibold))
-                                    Text("Free mode uses 12 MP. Upgrade to unlock the full-resolution option.")
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer(minLength: 8)
-                                Button("Unlock") {
-                                    premiumManager.presentPaywall(for: .fullResolution)
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Save Original RAW (.dng)", isOn: $cameraService.saveRAWToLibrary)
-                        Text("Keeps the untouched DNG from the camera in your Photos library.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text("Capture")
-                }
-
-                Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Processing Source")
-                            .font(.subheadline.weight(.semibold))
-                        Text("Choose which version the app uses to create your styled photo.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Picker("Styled Processing Source", selection: $cameraService.styledProcessingSource) {
-                            ForEach(StyledProcessingSource.allCases) { source in
-                                Text(source.shortLabel).tag(source)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("HEIF Bit Depth")
-                            .font(.subheadline.weight(.semibold))
-                        Text("10-bit keeps smoother color gradients. 8-bit exports faster and makes smaller files.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Picker("Styled HEIF Bit Depth", selection: $cameraService.styledHEIFBitDepth) {
-                            ForEach(StyledHEIFBitDepth.allCases) { bitDepth in
-                                Text(bitDepth.shortLabel).tag(bitDepth)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("HEIF Compression")
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Text("\(Int((cameraService.styledHEIFCompressionQuality * 100).rounded()))%")
-                                .font(.caption.monospacedDigit().weight(.semibold))
-                                .foregroundStyle(themeTextSecondary)
-                        }
-                        Text("Move right for higher quality and larger files. Move left for smaller files and faster saves.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-
-                        ThemedSlider(
-                            value: heifCompressionPercentBinding,
-                            range: StyledHEIFExportDefaults.compressionQualityRange.lowerBound * 100...StyledHEIFExportDefaults.compressionQualityRange.upperBound * 100,
-                            minimumTrackColor: themeTeal,
-                            maximumTrackColor: themePink.opacity(0.22),
-                            thumbColor: themePink
-                        )
-                        .frame(height: 28)
-
-                        HStack {
-                            Text("85%")
-                                .font(.caption2.monospacedDigit().weight(.semibold))
-                                .foregroundStyle(themeTextSecondary.opacity(0.8))
-                            Spacer()
-                            Text("100%")
-                                .font(.caption2.monospacedDigit().weight(.semibold))
-                                .foregroundStyle(themeTextSecondary.opacity(0.8))
-                        }
-                    }
-                } header: {
-                    Text("Styled Export")
-                }
-
-                Section {
-                    if premiumManager.hasPremiumAccess {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Toggle("Live Preset Preview", isOn: livePresetPreviewBinding)
-                            Text("Shows your preset's tone and color changes directly in the camera preview. Grain, bloom, and vignette are still applied after capture.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                    } else {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "lock.fill")
-                                .foregroundStyle(themePink.opacity(0.9))
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Live Preset Preview is part of Grejn Pro.")
-                                    .font(.footnote.weight(.semibold))
-                                Text("See tone and color changes on the live camera view before you shoot. Grain, bloom, and vignette are still added after capture.")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 8)
-                            Button("Unlock") {
-                                premiumManager.presentPaywall(for: .livePresetPreview)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                } header: {
-                    Text("Preview")
-                }
-
-                Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Show Exposure Slider", isOn: $cameraService.exposureSliderVisible)
-                        Text("Shows or hides the manual exposure control under the camera preview.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text("Controls")
-                }
-
-                if !cameraService.appleProRAWSupported {
-                    Section("Compatibility") {
-                        Text("ProRAW is not supported on the current device/lens.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Section("Info") {
-                    Text("Photo Priority: Balanced is usually faster. Quality can help in low light or fine detail, but it may take longer to save.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("Max Resolution: Full keeps maximum detail. 12 MP is lighter, faster, and easier on storage.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("Processing Source: ProRAW gives the best base quality for styled exports. Processed is the faster option.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("HEIF Bit Depth: 10-bit keeps smoother gradients. 8-bit saves faster and uses less space.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("HEIF Compression: 100% keeps the largest files and the least compression. Around 85% usually saves a lot of space with only a small quality drop.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("Live Preset Preview: Shows your preset's tone and color adjustments in real time. Grain, bloom, and vignette stay capture-only so preview remains responsive.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("Capture uses Apple ProRAW at \(cameraService.resolutionCap.label) resolution.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("If Save Original RAW is on, the untouched DNG is also stored in Photos.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .tint(themeTeal)
-            .scrollContentBackground(.hidden)
-            .background(
-                LinearGradient(
-                    colors: [themeBackgroundTop, themeBackgroundBottom],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
-            )
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { showSettingsSheet = false }
-                        .foregroundStyle(themePink)
-                }
-            }
-        }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-        .sheet(isPresented: $premiumManager.isPaywallPresented) {
-            PremiumPaywallView()
-                .environmentObject(premiumManager)
-        }
-    }
-
-    private var selectedUserPreset: PhotoEffectPreset? {
-        visibleEffectPresets.first(where: { $0.id == cameraService.selectedEffectPresetID })
-    }
-
-    private var selectedPresetHasUnsavedChanges: Bool {
-        guard let selectedUserPreset else { return false }
-        return selectedUserPreset.settings.clamped() != cameraService.effectSettings.clamped()
-    }
-
-    private var effectsSheet: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                referencePreview
-                    .padding(.horizontal, 16)
-                    .padding(.top, 10)
-                    .padding(.bottom, 8)
-
-                Form {
-                    Section("Presets") {
-                        Picker("Preset", selection: effectPresetSelectionBinding) {
-                            Text("Original")
-                                .tag(PhotoEffectLibrary.customPresetID)
-                            ForEach(visibleEffectPresets) { preset in
-                                Text(preset.name)
-                                    .tag(preset.id)
-                            }
-                        }
-                        .pickerStyle(.menu)
-
-                        if selectedUserPreset != nil {
-                            ColorPicker("Preset Color", selection: selectedPresetDisplayColorBinding, supportsOpacity: false)
-                        }
-
-                        HStack(spacing: 10) {
-                            TextField("Preset name", text: $presetNameDraft)
-                                .textInputAutocapitalization(.words)
-                                .disableAutocorrection(true)
-
-                            if hasReachedFreePresetLimit {
-                                Button("Unlock Pro") {
-                                    premiumManager.presentPaywall(for: .unlimitedPresets)
-                                }
-                            } else {
-                                Button("Save New") {
-                                    saveNewPreset()
-                                }
-                                .disabled(presetNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            }
-
-                            if selectedUserPreset != nil {
-                                Button("Update") {
-                                    cameraService.updateSelectedPresetFromCurrentSettings()
-                                }
-                                .disabled(!selectedPresetHasUnsavedChanges)
-                            }
-                        }
-
-                        if hasReachedFreePresetLimit {
-                            Text("Free mode includes 1 saved preset. Upgrade to Grejn Pro for unlimited presets.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        ForEach(visibleEffectPresets) { preset in
-                            HStack {
-                                Circle()
-                                    .fill(presetDisplayColor(for: preset))
-                                    .frame(width: 10, height: 10)
-                                Text(preset.name)
-                                    .foregroundStyle(presetDisplayColor(for: preset))
-                                    .lineLimit(1)
-                                Spacer()
-                                if cameraService.selectedEffectPresetID == preset.id {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(themeTeal)
-                                }
-                                Button(role: .destructive) {
-                                    cameraService.deleteEffectPreset(preset)
-                                } label: {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                        }
-                    }
-
-                    collapsibleEffectsSection(.base) {
-                        effectSlider(
-                            title: "Base Exposure",
-                            value: effectBinding(\.baseExposure),
-                            range: PhotoEffectSettings.baseExposureRange
-                        )
-                        effectSlider(
-                            title: "Contrast",
-                            value: effectBinding(\.contrast),
-                            range: PhotoEffectSettings.contrastRange
-                        )
-                        effectSlider(
-                            title: "Highlights",
-                            value: effectBinding(\.highlights),
-                            range: PhotoEffectSettings.highlightsRange
-                        )
-                        effectSlider(
-                            title: "Shadows",
-                            value: effectBinding(\.shadows),
-                            range: PhotoEffectSettings.shadowsRange
-                        )
-                        effectSlider(
-                            title: "Whites",
-                            value: effectBinding(\.whites),
-                            range: PhotoEffectSettings.whitesRange
-                        )
-                        effectSlider(
-                            title: "Blacks",
-                            value: effectBinding(\.blacks),
-                            range: PhotoEffectSettings.blacksRange
-                        )
-                        effectSlider(
-                            title: "White Fade",
-                            value: effectBinding(\.whiteFade),
-                            range: PhotoEffectSettings.whiteFadeRange
-                        )
-                        effectSlider(
-                            title: "Black Fade",
-                            value: effectBinding(\.blackFade),
-                            range: PhotoEffectSettings.blackFadeRange
-                        )
-                        effectSlider(
-                            title: "Clarity",
-                            value: effectBinding(\.clarity),
-                            range: PhotoEffectSettings.clarityRange
-                        )
-                        effectSlider(
-                            title: "Sharpness",
-                            value: effectBinding(\.sharpness),
-                            range: PhotoEffectSettings.sharpnessRange
-                        )
-                    }
-
-                    collapsibleEffectsSection(.color) {
-                        effectSlider(
-                            title: "Saturation",
-                            value: effectBinding(\.saturation),
-                            range: PhotoEffectSettings.saturationRange
-                        )
-                        effectSlider(
-                            title: "Vibrance",
-                            value: effectBinding(\.vibrance),
-                            range: PhotoEffectSettings.vibranceRange
-                        )
-                        effectSlider(
-                            title: "Warmth",
-                            value: effectBinding(\.warmth),
-                            range: PhotoEffectSettings.warmthRange,
-                            decimals: 0,
-                            tint: warmthTintColor(value: cameraService.effectSettings.warmth)
-                        )
-                        effectSlider(
-                            title: "Tint",
-                            value: effectBinding(\.tint),
-                            range: PhotoEffectSettings.tintRange,
-                            decimals: 0,
-                            tint: tintAdjustmentColor(value: cameraService.effectSettings.tint)
-                        )
-                    }
-
-                    collapsibleEffectsSection(.colorGrading) {
-                        effectSlider(
-                            title: "Global Hue",
-                            value: colorGradeBinding(\.global, \.hue),
-                            range: PhotoEffectSettings.colorGradeHueRange,
-                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.global.hue)
-                        )
-                        effectSlider(
-                            title: "Global Amount",
-                            value: colorGradeBinding(\.global, \.amount),
-                            range: PhotoEffectSettings.colorGradeAmountRange,
-                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.global.hue)
-                        )
-                        effectSlider(
-                            title: "Shadows Hue",
-                            value: colorGradeBinding(\.shadows, \.hue),
-                            range: PhotoEffectSettings.colorGradeHueRange,
-                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.shadows.hue)
-                        )
-                        effectSlider(
-                            title: "Shadows Amount",
-                            value: colorGradeBinding(\.shadows, \.amount),
-                            range: PhotoEffectSettings.colorGradeAmountRange,
-                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.shadows.hue)
-                        )
-                        effectSlider(
-                            title: "Midtones Hue",
-                            value: colorGradeBinding(\.midtones, \.hue),
-                            range: PhotoEffectSettings.colorGradeHueRange,
-                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.midtones.hue)
-                        )
-                        effectSlider(
-                            title: "Midtones Amount",
-                            value: colorGradeBinding(\.midtones, \.amount),
-                            range: PhotoEffectSettings.colorGradeAmountRange,
-                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.midtones.hue)
-                        )
-                        effectSlider(
-                            title: "Highlights Hue",
-                            value: colorGradeBinding(\.highlights, \.hue),
-                            range: PhotoEffectSettings.colorGradeHueRange,
-                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.highlights.hue)
-                        )
-                        effectSlider(
-                            title: "Highlights Amount",
-                            value: colorGradeBinding(\.highlights, \.amount),
-                            range: PhotoEffectSettings.colorGradeAmountRange,
-                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.highlights.hue)
-                        )
-                    }
-
-                    collapsibleEffectsSection(.hslMix) {
-                        ForEach(HSLColorBand.allCases) { band in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(band.title)
-                                    .font(.subheadline.weight(.semibold))
-                                effectSlider(
-                                    title: "Hue",
-                                    value: hslBinding(for: band, \.hueShift),
-                                    range: PhotoEffectSettings.hslHueRange,
-                                    tint: hslHueTintColor(for: band, shift: cameraService.effectSettings.hsl[band].hueShift)
-                                )
-                                effectSlider(
-                                    title: "Saturation",
-                                    value: hslBinding(for: band, \.saturationDelta),
-                                    range: PhotoEffectSettings.hslSaturationRange,
-                                    tint: hslSaturationTintColor(for: band, delta: cameraService.effectSettings.hsl[band].saturationDelta)
-                                )
-                                effectSlider(
-                                    title: "Luminance",
-                                    value: hslBinding(for: band, \.lightnessDelta),
-                                    range: PhotoEffectSettings.hslLightnessRange,
-                                    tint: hslLuminanceTintColor(for: band, delta: cameraService.effectSettings.hsl[band].lightnessDelta)
-                                )
-                            }
-                            .padding(.vertical, 4)
-                        }
-                    }
-
-                    collapsibleEffectsSection(.stylization) {
-                        effectSlider(
-                            title: "Bloom Intensity",
-                            value: effectBinding(\.bloomIntensity),
-                            range: PhotoEffectSettings.bloomIntensityRange
-                        )
-                        effectSlider(
-                            title: "Bloom Radius",
-                            value: effectBinding(\.bloomRadius),
-                            range: PhotoEffectSettings.bloomRadiusRange,
-                            decimals: 1
-                        )
-                        effectSlider(
-                            title: "Vignette",
-                            value: effectBinding(\.vignetteIntensity),
-                            range: PhotoEffectSettings.vignetteIntensityRange
-                        )
-                        effectSlider(
-                            title: "Vignette Radius",
-                            value: effectBinding(\.vignetteRadius),
-                            range: PhotoEffectSettings.vignetteRadiusRange,
-                            decimals: 2
-                        )
-                        effectSlider(
-                            title: "Grain",
-                            value: effectBinding(\.grainAmount),
-                            range: PhotoEffectSettings.grainAmountRange
-                        )
-                        effectSlider(
-                            title: "Grain Size",
-                            value: effectBinding(\.grainSize),
-                            range: PhotoEffectSettings.grainSizeRange
-                        )
-                    }
-                }
-            }
-            .tint(themeTeal)
-            .scrollContentBackground(.hidden)
-            .background(
-                LinearGradient(
-                    colors: [themeBackgroundTop, themeBackgroundBottom],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
-            )
-            .navigationTitle("Effects")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Reset") {
-                        cameraService.resetCurrentEffectAdjustments()
-                        scheduleReferenceRender()
-                    }
-                    .foregroundStyle(themePink)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { showEffectsSheet = false }
-                        .foregroundStyle(themePink)
-                }
-            }
-        }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-        .sheet(isPresented: $premiumManager.isPaywallPresented) {
-            PremiumPaywallView()
-                .environmentObject(premiumManager)
-        }
-    }
-
-    private var referencePreview: some View {
-        return ZStack {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(themeBackgroundBottom.opacity(0.55))
-
-            if let referenceImage = renderedReferenceImage ?? Self.editorReferenceImage {
-                Image(uiImage: referenceImage)
-                    .resizable()
-                    .scaledToFit()
-                    .padding(10)
-            } else {
-                VStack(spacing: 8) {
-                    Image(systemName: "photo")
-                        .font(.title3.weight(.semibold))
-                    Text("Missing reference image")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                .foregroundStyle(themeTextSecondary)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 220)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(themePink.opacity(0.32), lineWidth: 1)
-        )
-    }
-
-    private func scheduleReferenceRender() {
-        guard showEffectsSheet, let sourceImage = Self.editorReferenceImage else { return }
-        let settings = cameraService.effectSettings
-        referenceRenderGeneration &+= 1
-        let generation = referenceRenderGeneration
-
-        referenceRenderTask?.cancel()
-        referenceRenderTask = Task.detached(priority: .userInitiated) {
-            try? await Task.sleep(nanoseconds: Self.referenceRenderDebounceNanoseconds)
-            guard !Task.isCancelled else { return }
-            let shouldRender = await MainActor.run { generation == referenceRenderGeneration && showEffectsSheet }
-            guard shouldRender else { return }
-
-            let rendered = Self.referencePreviewProcessor.renderReferencePreview(
-                from: sourceImage,
-                settings: settings,
-                maxDimension: Self.referencePreviewRenderDimension,
-                includeGrain: false
-            )
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard generation == referenceRenderGeneration, showEffectsSheet else { return }
-                renderedReferenceImage = rendered
-            }
-        }
-    }
-
-    private func effectBinding(_ keyPath: WritableKeyPath<PhotoEffectSettings, Double>) -> Binding<Double> {
-        Binding(
-            get: { cameraService.effectSettings[keyPath: keyPath] },
-            set: { nextValue in
-                cameraService.updateEffectSetting { settings in
-                    settings[keyPath: keyPath] = nextValue
-                }
-                scheduleReferenceRender()
-            }
-        )
-    }
-
-    private func hslBinding(
-        for band: HSLColorBand,
-        _ keyPath: WritableKeyPath<HSLBandAdjustment, Double>
-    ) -> Binding<Double> {
-        Binding(
-            get: { cameraService.effectSettings.hsl[band][keyPath: keyPath] },
-            set: { nextValue in
-                cameraService.updateEffectSetting { settings in
-                    var adjustment = settings.hsl[band]
-                    adjustment[keyPath: keyPath] = nextValue
-                    settings.hsl[band] = adjustment
-                }
-                scheduleReferenceRender()
-            }
-        )
-    }
-
-    private func colorGradeBinding(
-        _ toneKeyPath: WritableKeyPath<ColorGradingSettings, ColorGradeTone>,
-        _ valueKeyPath: WritableKeyPath<ColorGradeTone, Double>
-    ) -> Binding<Double> {
-        Binding(
-            get: { cameraService.effectSettings.colorGrading[keyPath: toneKeyPath][keyPath: valueKeyPath] },
-            set: { nextValue in
-                cameraService.updateEffectSetting { settings in
-                    var tone = settings.colorGrading[keyPath: toneKeyPath]
-                    tone[keyPath: valueKeyPath] = nextValue
-                    settings.colorGrading[keyPath: toneKeyPath] = tone
-                }
-                scheduleReferenceRender()
-            }
-        )
-    }
-
-    private var heifCompressionPercentBinding: Binding<Double> {
-        Binding(
-            get: { cameraService.styledHEIFCompressionQuality * 100 },
-            set: { nextValue in
-                cameraService.styledHEIFCompressionQuality = nextValue.rounded() / 100
-            }
-        )
-    }
-
-    @ViewBuilder
-    private func collapsibleEffectsSection<Content: View>(
-        _ group: EffectEditorGroup,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        Section {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    toggleEffectsGroup(group)
-                }
-            } label: {
-                HStack(spacing: 10) {
-                    Text(group.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(themePink.opacity(0.96))
-                    Spacer()
-                    Image(systemName: expandedEffectGroups.contains(group) ? "chevron.down.circle.fill" : "chevron.right.circle.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(themeTeal)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if expandedEffectGroups.contains(group) {
-                content()
-            }
-        }
-    }
-
-    private func toggleEffectsGroup(_ group: EffectEditorGroup) {
-        if expandedEffectGroups.contains(group) {
-            expandedEffectGroups.remove(group)
-        } else {
-            expandedEffectGroups = [group]
-        }
-    }
-
-    private func effectSlider(
-        title: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>,
-        decimals: Int = 2,
-        tint: Color? = nil
-    ) -> some View {
-        let sliderTint = tint ?? themeTeal
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(themePink.opacity(0.92))
-                Spacer()
-                Text(value.wrappedValue, format: .number.precision(.fractionLength(decimals)))
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(themeTextSecondary)
-            }
-            ThemedSlider(
-                value: value,
-                range: range,
-                minimumTrackColor: sliderTint,
-                maximumTrackColor: themePink.opacity(0.22),
-                thumbColor: themePink
-            )
-                .frame(height: 28)
-                .contentShape(Rectangle())
-                .padding(.vertical, 2)
-        }
-        .padding(.vertical, 2)
-    }
-
-    private func presetScrollTargetID(for presetID: String) -> String {
-        "main-preset-\(presetID)"
-    }
-
-    private func saveNewPreset() {
-        guard !hasReachedFreePresetLimit else {
-            premiumManager.presentPaywall(for: .unlimitedPresets)
-            return
-        }
-
-        cameraService.saveCurrentEffectsAsPreset(named: presetNameDraft)
-        presetNameDraft = ""
-    }
-
-    private func applyPremiumAccessState() {
-        cameraService.applyPremiumAccess(premiumManager.hasPremiumAccess)
-
-        guard !premiumManager.hasPremiumAccess else { return }
-        guard cameraService.selectedEffectPresetID != PhotoEffectLibrary.customPresetID else { return }
-
-        let visiblePresetIDs = Set(visibleEffectPresets.map(\.id))
-        guard !visiblePresetIDs.contains(cameraService.selectedEffectPresetID) else { return }
-
-        if let firstVisiblePreset = visibleEffectPresets.first {
-            cameraService.applyEffectPreset(firstVisiblePreset)
-        } else {
-            cameraService.resetEffectsToNeutral()
-        }
-    }
-
-    private func scrollPresetStrip(to proxy: ScrollViewProxy, animated: Bool) {
-        let action = {
-            proxy.scrollTo(presetScrollTargetID(for: cameraService.selectedEffectPresetID), anchor: .center)
-        }
-        if animated {
-            withAnimation(.easeInOut(duration: 0.22)) {
-                action()
-            }
-        } else {
-            action()
-        }
-    }
-
-    private func gradeTintColor(hue: Double) -> Color {
-        let normalized = normalizedHueUnit(hue)
-        return Color(hue: normalized, saturation: 0.9, brightness: 0.95)
-    }
-
-    private func presetDisplayColor(for preset: PhotoEffectPreset) -> Color {
-        guard let displayColor = preset.displayColor?.clamped() else { return themeTeal }
-        return Color(red: displayColor.red, green: displayColor.green, blue: displayColor.blue)
-    }
-
-    private func presetDisplayColorModel(from color: Color) -> PresetDisplayColor {
-        let uiColor = UIColor(color)
-        var red: CGFloat = 0
-        var green: CGFloat = 0
-        var blue: CGFloat = 0
-        var alpha: CGFloat = 0
-
-        guard uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
-            return PresetDisplayColor(red: 0.07, green: 0.74, blue: 0.70)
-        }
-
-        return PresetDisplayColor(
-            red: Double(red),
-            green: Double(green),
-            blue: Double(blue)
-        )
-    }
-
-    private func warmthTintColor(value: Double) -> Color {
-        let neutral = UIColor(themeTextSecondary.opacity(0.9))
-        let cool = UIColor(red: 0.35, green: 0.72, blue: 0.98, alpha: 1)
-        let warm = UIColor(red: 1.0, green: 0.63, blue: 0.24, alpha: 1)
-        let progress = normalizedUnit(value, in: PhotoEffectSettings.warmthRange)
-
-        if progress < 0.5 {
-            return interpolateColor(from: cool, to: neutral, progress: progress / 0.5)
-        }
-
-        return interpolateColor(from: neutral, to: warm, progress: (progress - 0.5) / 0.5)
-    }
-
-    private func tintAdjustmentColor(value: Double) -> Color {
-        let neutral = UIColor(themeTextSecondary.opacity(0.9))
-        let green = UIColor(red: 0.34, green: 0.86, blue: 0.58, alpha: 1)
-        let magenta = UIColor(red: 0.96, green: 0.47, blue: 0.82, alpha: 1)
-        let progress = normalizedUnit(value, in: PhotoEffectSettings.tintRange)
-
-        if progress < 0.5 {
-            return interpolateColor(from: green, to: neutral, progress: progress / 0.5)
-        }
-
-        return interpolateColor(from: neutral, to: magenta, progress: (progress - 0.5) / 0.5)
-    }
-
-    private func hslHueTintColor(for band: HSLColorBand, shift: Double) -> Color {
-        hslBandColor(for: band, hueShift: shift, saturation: 0.92, brightness: 0.96)
-    }
-
-    private func hslSaturationTintColor(for band: HSLColorBand, delta: Double) -> Color {
-        let progress = normalizedUnit(delta, in: PhotoEffectSettings.hslSaturationRange)
-        let saturation = 0.18 + (progress * 0.78)
-        let brightness = 0.76 + (progress * 0.2)
-        return hslBandColor(for: band, saturation: saturation, brightness: brightness)
-    }
-
-    private func hslLuminanceTintColor(for band: HSLColorBand, delta: Double) -> Color {
-        let progress = normalizedUnit(delta, in: PhotoEffectSettings.hslLightnessRange)
-        let saturation = 0.92 - (progress * 0.28)
-        let brightness = 0.42 + (progress * 0.54)
-        return hslBandColor(for: band, saturation: saturation, brightness: brightness)
-    }
-
-    private func hslBandColor(
-        for band: HSLColorBand,
-        hueShift: Double = 0,
-        saturation: Double = 0.9,
-        brightness: Double = 0.95
-    ) -> Color {
-        let normalized = normalizedHueUnit(hslBandBaseHueDegrees(for: band) + hueShift)
-        return Color(hue: normalized, saturation: saturation, brightness: brightness)
-    }
-
-    private func hslBandBaseHueDegrees(for band: HSLColorBand) -> Double {
-        switch band {
-        case .red: return 0
-        case .orange: return 28
-        case .yellow: return 56
-        case .green: return 122
-        case .aqua: return 182
-        case .blue: return 220
-        case .purple: return 276
-        case .magenta: return 320
-        }
-    }
-
-    private func normalizedHueUnit(_ hue: Double) -> Double {
-        let degrees = hue.truncatingRemainder(dividingBy: 360)
-        return (degrees < 0 ? degrees + 360 : degrees) / 360
-    }
-
-    private func normalizedUnit(_ value: Double, in range: ClosedRange<Double>) -> Double {
-        let span = range.upperBound - range.lowerBound
-        guard span > 0 else { return 0 }
-        let clamped = min(max(value, range.lowerBound), range.upperBound)
-        return (clamped - range.lowerBound) / span
-    }
-
-    private func interpolateColor(from start: UIColor, to end: UIColor, progress: Double) -> Color {
-        let clamped = min(max(progress, 0), 1)
-
-        var startRed: CGFloat = 0
-        var startGreen: CGFloat = 0
-        var startBlue: CGFloat = 0
-        var startAlpha: CGFloat = 0
-        var endRed: CGFloat = 0
-        var endGreen: CGFloat = 0
-        var endBlue: CGFloat = 0
-        var endAlpha: CGFloat = 0
-
-        guard start.getRed(&startRed, green: &startGreen, blue: &startBlue, alpha: &startAlpha),
-              end.getRed(&endRed, green: &endGreen, blue: &endBlue, alpha: &endAlpha) else {
-            return Color(uiColor: end)
-        }
-
-        let inverse = 1 - clamped
-        return Color(
-            red: Double((startRed * inverse) + (endRed * clamped)),
-            green: Double((startGreen * inverse) + (endGreen * clamped)),
-            blue: Double((startBlue * inverse) + (endBlue * clamped)),
-            opacity: Double((startAlpha * inverse) + (endAlpha * clamped))
-        )
-    }
-
-    private func shortPresetTitle(_ name: String) -> String {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return "Preset" }
-        if trimmed.count <= 8 { return trimmed }
-        return String(trimmed.prefix(8))
-    }
-
     // MARK: - Capture format helpers
 
     private func normalizeCaptureFormatSelection() {
@@ -2210,7 +1254,7 @@ struct ContentView: View {
     }
 }
 
-private struct ThemedSlider: UIViewRepresentable {
+struct ThemedSlider: UIViewRepresentable {
     @Binding var value: Double
     let range: ClosedRange<Double>
     let minimumTrackColor: Color

@@ -11,6 +11,7 @@ import UIKit
 @main
 struct TrueCameraApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var premiumManager = PremiumManager()
 
     var body: some Scene {
@@ -18,6 +19,18 @@ struct TrueCameraApp: App {
             ContentView()
                 .environmentObject(premiumManager)
                 .preferredColorScheme(.dark)
+                .onAppear {
+                    updateIdleTimer(for: scenePhase)
+                }
+                .onChange(of: scenePhase) { _, newPhase in
+                    updateIdleTimer(for: newPhase)
+                }
+        }
+    }
+
+    private func updateIdleTimer(for phase: ScenePhase) {
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = (phase == .active)
         }
     }
 }
@@ -28,17 +41,5 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
         .portrait
-    }
-
-    func applicationDidBecomeActive(_ application: UIApplication) {
-        application.isIdleTimerDisabled = true
-    }
-
-    func applicationWillResignActive(_ application: UIApplication) {
-        application.isIdleTimerDisabled = false
-    }
-
-    func applicationDidEnterBackground(_ application: UIApplication) {
-        application.isIdleTimerDisabled = false
     }
 }

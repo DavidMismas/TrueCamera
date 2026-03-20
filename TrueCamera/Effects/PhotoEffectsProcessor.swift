@@ -550,7 +550,7 @@ final class PhotoEffectsProcessor {
     }
 
     nonisolated private func applyPerceptualContrast(_ value: Double, to image: CIImage) -> CIImage {
-        let amount = Float(max(0.01, 1.0 + ((value * 1.4) / 100.0)))
+        let amount = Float(max(0.01, 1.0 + ((value * 2.35) / 100.0)))
         var output = image
 
         // Apply contrast in perceptual sRGB so it behaves like a normal contrast control,

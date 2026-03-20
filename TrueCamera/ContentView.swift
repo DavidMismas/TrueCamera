@@ -400,7 +400,7 @@ struct ContentView: View {
         .fullScreenCover(isPresented: $showImageEditor) {
             ImageEditorView(
                 cameraService: cameraService,
-                initialSettings: cameraService.effectSettingsSnapshot()
+                initialSettings: .neutral
             )
         }
         .onChange(of: showEffectsSheet) { _, isPresented in

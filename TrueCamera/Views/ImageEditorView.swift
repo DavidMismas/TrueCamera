@@ -90,22 +90,25 @@ struct ImageEditorView: View {
     var body: some View {
         NavigationStack {
             GeometryReader { proxy in
-                ScrollView {
-                    VStack(spacing: 16) {
-                        previewCard(availableSize: proxy.size)
-                            .padding(.horizontal, previewHorizontalPadding)
-                            .padding(.top, 12)
+                VStack(spacing: 0) {
+                    previewCard(availableSize: proxy.size)
+                        .padding(.horizontal, previewHorizontalPadding)
+                        .padding(.top, 12)
+                        .padding(.bottom, 12)
 
-                        importSummaryRow
-                            .padding(.horizontal, previewHorizontalPadding)
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            importSummaryRow
+                                .padding(.horizontal, previewHorizontalPadding)
 
-                        effectSections
-                            .padding(.horizontal, previewHorizontalPadding)
-                            .padding(.bottom, 28)
+                            effectSections
+                                .padding(.horizontal, previewHorizontalPadding)
+                                .padding(.bottom, 28)
+                        }
+                        .frame(maxWidth: .infinity)
                     }
-                    .frame(maxWidth: .infinity)
+                    .scrollIndicators(.hidden)
                 }
-                .scrollIndicators(.hidden)
             }
             .background(
                 LinearGradient(

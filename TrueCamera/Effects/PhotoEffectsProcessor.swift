@@ -118,9 +118,13 @@ final class PhotoEffectsProcessor {
         preferredHEIFBitDepth: StyledHEIFBitDepth = .tenBit,
         preferredHEIFCompressionQuality: Double = 1.0,
         preferredProcessingSource: StyledProcessingSource = .proRAW,
-        preferredOutputFormat: ProcessedImageExportFormat = .heic
+        preferredOutputFormat: ProcessedImageExportFormat = .heic,
+        cropRectNormalized: CGRect? = nil
     ) -> (data: Data, uniformTypeIdentifier: String)? {
+        let normalizedCropRect = normalizedCropRect(for: cropRectNormalized)
+        let shouldCrop = normalizedCropRect.map { !isFullFrameCropRect($0) } ?? false
         if shouldBypassNeutralProcessing(settings),
+           !shouldCrop,
            let processedData,
            let passthroughUTI = detectedPassthroughUTI(for: processedData),
            preferredOutputFormat == .heic || passthroughUTI == ProcessedImageExportFormat.jpeg.uniformTypeIdentifier {
@@ -133,9 +137,10 @@ final class PhotoEffectsProcessor {
             processedData: processedData,
             preferredProcessingSource: preferredProcessingSource
         ) else { return nil }
-        let exportPixelCount = Int64(max(0.0, Double(input.extent.integral.width * input.extent.integral.height)))
+        let croppedInput = cropIfNeeded(image: input, normalizedRect: normalizedCropRect)
+        let exportPixelCount = Int64(max(0.0, Double(croppedInput.extent.integral.width * croppedInput.extent.integral.height)))
         var graded = apply(
-            to: input,
+            to: croppedInput,
             settings: settings,
             includeGrain: false,
             cubeDimension: exportCubeDimension,
@@ -185,6 +190,54 @@ final class PhotoEffectsProcessor {
             return "public.jpeg"
         }
         return nil
+    }
+
+    nonisolated private func normalizedCropRect(for candidate: CGRect?) -> CGRect? {
+        guard let candidate else { return nil }
+        let rect = CGRect(
+            x: clamp(candidate.origin.x, 0, 1),
+            y: clamp(candidate.origin.y, 0, 1),
+            width: clamp(candidate.size.width, 0.01, 1),
+            height: clamp(candidate.size.height, 0.01, 1)
+        )
+        guard rect.maxX > 0.01, rect.maxY > 0.01 else { return nil }
+        return CGRect(
+            x: min(rect.origin.x, 1 - rect.width),
+            y: min(rect.origin.y, 1 - rect.height),
+            width: min(rect.width, 1),
+            height: min(rect.height, 1)
+        )
+    }
+
+    nonisolated private func isFullFrameCropRect(_ rect: CGRect) -> Bool {
+        abs(rect.minX) < 0.0005 &&
+            abs(rect.minY) < 0.0005 &&
+            abs(rect.width - 1) < 0.0005 &&
+            abs(rect.height - 1) < 0.0005
+    }
+
+    nonisolated private func crop(image: CIImage, normalizedRect: CGRect) -> CIImage {
+        let extent = image.extent.integral
+        guard extent.width > 0, extent.height > 0 else { return image }
+
+        let cropRect = CGRect(
+            x: extent.minX + (normalizedRect.minX * extent.width),
+            y: extent.minY + ((1 - normalizedRect.maxY) * extent.height),
+            width: normalizedRect.width * extent.width,
+            height: normalizedRect.height * extent.height
+        ).integral
+
+        let intersection = cropRect.intersection(extent)
+        guard !intersection.isNull, intersection.width > 0, intersection.height > 0 else { return image }
+        return image.cropped(to: intersection)
+    }
+
+    nonisolated private func cropIfNeeded(image: CIImage, normalizedRect: CGRect?) -> CIImage {
+        guard let normalizedRect = normalizedCropRect(for: normalizedRect),
+              !isFullFrameCropRect(normalizedRect) else {
+            return image
+        }
+        return crop(image: image, normalizedRect: normalizedRect)
     }
 
     nonisolated private func shouldBypassNeutralProcessing(_ settings: PhotoEffectSettings) -> Bool {
@@ -256,7 +309,8 @@ final class PhotoEffectsProcessor {
         from image: UIImage,
         settings: PhotoEffectSettings,
         maxDimension: CGFloat = 1100,
-        includeGrain: Bool = true
+        includeGrain: Bool = true,
+        cropRectNormalized: CGRect? = nil
     ) -> UIImage? {
         let input: CIImage?
         if let cgImage = image.cgImage {
@@ -266,8 +320,9 @@ final class PhotoEffectsProcessor {
         }
         guard let input else { return nil }
 
+        let croppedInput = cropIfNeeded(image: input, normalizedRect: cropRectNormalized)
         let graded = apply(
-            to: input,
+            to: croppedInput,
             settings: settings,
             includeGrain: includeGrain,
             cubeDimension: previewCubeDimension
@@ -290,7 +345,8 @@ final class PhotoEffectsProcessor {
         settings: PhotoEffectSettings,
         preferredProcessingSource: StyledProcessingSource = .proRAW,
         maxDimension: CGFloat = 1400,
-        includeGrain: Bool = false
+        includeGrain: Bool = false,
+        cropRectNormalized: CGRect? = nil
     ) -> UIImage? {
         guard let input = makeExportInputImage(
             rawData: rawData,
@@ -298,8 +354,9 @@ final class PhotoEffectsProcessor {
             preferredProcessingSource: preferredProcessingSource
         ) else { return nil }
 
+        let croppedInput = cropIfNeeded(image: input, normalizedRect: cropRectNormalized)
         let graded = apply(
-            to: input,
+            to: croppedInput,
             settings: settings,
             includeGrain: includeGrain,
             cubeDimension: previewCubeDimension

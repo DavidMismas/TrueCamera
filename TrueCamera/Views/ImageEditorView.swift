@@ -13,6 +13,7 @@ struct ImageEditorView: View {
         let processedData: Data?
         let processingSource: StyledProcessingSource
         let pixelSize: CGSize
+        let displayAspectRatio: CGFloat
         let originalFilename: String?
 
         var hasRAWSource: Bool { rawData != nil }
@@ -21,13 +22,12 @@ struct ImageEditorView: View {
             return trimmed.isEmpty ? "Imported Photo" : trimmed
         }
         var aspectRatio: CGFloat {
-            let width = max(pixelSize.width, 1)
-            let height = max(pixelSize.height, 1)
-            return width / height
+            max(displayAspectRatio, 0.1)
         }
     }
 
     enum EffectGroup: String, CaseIterable, Hashable {
+        case crop
         case base
         case color
         case colorGrading
@@ -36,6 +36,7 @@ struct ImageEditorView: View {
 
         var title: String {
             switch self {
+            case .crop: return "Crop"
             case .base: return "Base"
             case .color: return "Color"
             case .colorGrading: return "Color Grading"
@@ -43,6 +44,66 @@ struct ImageEditorView: View {
             case .stylization: return "Stylization"
             }
         }
+    }
+
+    private enum CropAspectPreset: String, CaseIterable, Identifiable {
+        case original
+        case square
+        case twoThreePortrait
+        case threeTwoLandscape
+        case fourFivePortrait
+        case fiveFourLandscape
+        case threeFourPortrait
+        case fourThreeLandscape
+        case nineSixteenPortrait
+        case sixteenNineLandscape
+        case nineTwentyOnePortrait
+        case twentyOneNineLandscape
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .original: return "Original"
+            case .square: return "1:1"
+            case .twoThreePortrait: return "2:3 P"
+            case .threeTwoLandscape: return "3:2 L"
+            case .fourFivePortrait: return "4:5 P"
+            case .fiveFourLandscape: return "5:4 L"
+            case .threeFourPortrait: return "3:4 P"
+            case .fourThreeLandscape: return "4:3 L"
+            case .nineSixteenPortrait: return "9:16 P"
+            case .sixteenNineLandscape: return "16:9 L"
+            case .nineTwentyOnePortrait: return "9:21 P"
+            case .twentyOneNineLandscape: return "21:9 L"
+            }
+        }
+
+        var aspectRatio: CGFloat? {
+            switch self {
+            case .original: return nil
+            case .square: return 1
+            case .twoThreePortrait: return 2.0 / 3.0
+            case .threeTwoLandscape: return 3.0 / 2.0
+            case .fourFivePortrait: return 4.0 / 5.0
+            case .fiveFourLandscape: return 5.0 / 4.0
+            case .threeFourPortrait: return 3.0 / 4.0
+            case .fourThreeLandscape: return 4.0 / 3.0
+            case .nineSixteenPortrait: return 9.0 / 16.0
+            case .sixteenNineLandscape: return 16.0 / 9.0
+            case .nineTwentyOnePortrait: return 9.0 / 21.0
+            case .twentyOneNineLandscape: return 21.0 / 9.0
+            }
+        }
+    }
+
+    private enum CropHandle: CaseIterable, Identifiable {
+        case topLeading
+        case topTrailing
+        case bottomLeading
+        case bottomTrailing
+
+        var id: String { "\(self)" }
     }
 
     private enum EditorStatus: Equatable {
@@ -60,13 +121,19 @@ struct ImageEditorView: View {
     @State private var renderedPreviewImage: UIImage?
     @State private var previewRenderTask: Task<Void, Never>?
     @State private var previewRenderGeneration: UInt64 = 0
-    @State private var expandedGroups: Set<EffectGroup> = [.base]
+    @State private var expandedGroups: Set<EffectGroup> = [.crop]
     @State private var showPhotoPicker = false
     @State private var showExportSheet = false
     @State private var exportFormat: ProcessedImageExportFormat = .heic
     @State private var exportQuality: Double
     @State private var editorStatus: EditorStatus = .idle
     @State private var alertMessage: String?
+    @State private var selectedCropAspectPreset: CropAspectPreset = .original
+    @State private var appliedCropAspectPreset: CropAspectPreset = .original
+    @State private var cropRectNormalized = CGRect(x: 0, y: 0, width: 1, height: 1)
+    @State private var appliedCropRectNormalized: CGRect?
+    @State private var cropMoveStartRect: CGRect?
+    @State private var cropResizeStartRect: CGRect?
 
     private let themeTeal = Color(red: 0.07, green: 0.74, blue: 0.70)
     private let themePink = Color(red: 0.95, green: 0.54, blue: 0.75)
@@ -176,12 +243,14 @@ struct ImageEditorView: View {
             previewRenderTask?.cancel()
             previewRenderTask = nil
             previewSourceImage = nil
+            cropMoveStartRect = nil
+            cropResizeStartRect = nil
         }
     }
 
     private func previewCard(availableSize: CGSize) -> some View {
         let width = max(availableSize.width - (previewHorizontalPadding * 2), 0)
-        let aspect = importedPhoto?.aspectRatio ?? (4.0 / 3.0)
+        let aspect = currentPreviewDisplayAspectRatio
         let unclampedHeight = width / max(aspect, 0.1)
         let maxPortraitHeight = max(availableSize.height * previewMaxPortraitHeightRatio, 220)
         let previewHeight = aspect >= 1 ? unclampedHeight : min(unclampedHeight, maxPortraitHeight)
@@ -191,11 +260,30 @@ struct ImageEditorView: View {
                 .fill(themeBackgroundBottom.opacity(0.58))
 
             if let image = renderedPreviewImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(10)
+                GeometryReader { proxy in
+                    let contentRect = CGRect(
+                        x: 10,
+                        y: 10,
+                        width: max(proxy.size.width - 20, 0),
+                        height: max(proxy.size.height - 20, 0)
+                    )
+                    let imageFrame = aspectFitRect(for: image.size, in: contentRect)
+
+                    ZStack {
+                        Image(uiImage: image)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: imageFrame.width, height: imageFrame.height)
+                            .position(x: imageFrame.midX, y: imageFrame.midY)
+
+                        if isCropEditing {
+                            cropOverlay(
+                                canvasSize: proxy.size,
+                                imageFrame: imageFrame
+                            )
+                        }
+                    }
+                }
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: importedPhoto == nil ? "photo.badge.plus" : "wand.and.stars")
@@ -235,6 +323,9 @@ struct ImageEditorView: View {
                     if importedPhoto.hasRAWSource {
                         badge(title: "RAW", color: themePink)
                     }
+                    if let appliedCropRectNormalized, !isFullFrameCropRect(appliedCropRectNormalized) {
+                        badge(title: appliedCropAspectPreset.title, color: themePink)
+                    }
                     badge(
                         title: "\(Int(importedPhoto.pixelSize.width))×\(Int(importedPhoto.pixelSize.height))",
                         color: themeTeal
@@ -250,6 +341,10 @@ struct ImageEditorView: View {
 
     private var effectSections: some View {
         VStack(spacing: 14) {
+            collapsibleSection(.crop) {
+                cropSection
+            }
+
             collapsibleSection(.base) {
                 effectSlider(title: "Base Exposure", value: effectBinding(\.baseExposure), range: PhotoEffectSettings.baseExposureRange)
                 effectSlider(title: "Contrast", value: effectBinding(\.contrast), range: PhotoEffectSettings.contrastRange)
@@ -373,6 +468,50 @@ struct ImageEditorView: View {
         }
     }
 
+    private var cropSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if importedPhoto == nil {
+                Text("Import a photo to enable crop.")
+                    .font(.footnote)
+                    .foregroundStyle(themeTextSecondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Aspect Ratio")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(themePink.opacity(0.92))
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 72), spacing: 8)], spacing: 8) {
+                        ForEach(CropAspectPreset.allCases) { preset in
+                            cropPresetButton(for: preset)
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Controls")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(themePink.opacity(0.92))
+
+                    Text("Drag inside the frame to move it. Drag the corners to resize while keeping the selected ratio.")
+                        .font(.footnote)
+                        .foregroundStyle(themeTextSecondary)
+                }
+
+                Button("Reset Crop") {
+                    resetCropDraft()
+                }
+                .buttonStyle(.bordered)
+                .tint(themePink)
+
+                Button("Done") {
+                    applyCropDraft()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(themeTeal)
+            }
+        }
+    }
+
     private var exportSheet: some View {
         NavigationStack {
             Form {
@@ -406,7 +545,7 @@ struct ImageEditorView: View {
                 }
 
                 Section {
-                    Text("Exports are rendered from the full-resolution source. RAW imports stay RAW-backed for development, then save as JPEG or HEIC.")
+                    Text("Exports are rendered from the full-resolution source. Crop is applied at full resolution, and RAW imports stay RAW-backed for development before saving as JPEG or HEIC.")
                         .font(.footnote)
                         .foregroundStyle(themeTextSecondary)
                 }
@@ -484,6 +623,132 @@ struct ImageEditorView: View {
             .overlay(Capsule().stroke(color.opacity(0.2), lineWidth: 1))
     }
 
+    private func cropPresetButton(for preset: CropAspectPreset) -> some View {
+        Button {
+            applyCropPreset(preset)
+        } label: {
+            Text(preset.title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(selectedCropAspectPreset == preset ? themeBackgroundBottom : themeTextPrimary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(selectedCropAspectPreset == preset ? themeTeal : themeBackgroundBottom.opacity(0.75))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(
+                            selectedCropAspectPreset == preset ? themeTeal.opacity(0.15) : themePink.opacity(0.14),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(importedPhoto == nil)
+    }
+
+    @ViewBuilder
+    private func cropOverlay(
+        canvasSize: CGSize,
+        imageFrame: CGRect
+    ) -> some View {
+        let cropFrame = cropFrame(in: imageFrame)
+
+        Path { path in
+            path.addRect(CGRect(origin: .zero, size: canvasSize))
+            path.addRect(cropFrame)
+        }
+        .fill(Color.black.opacity(0.42), style: FillStyle(eoFill: true))
+
+        Rectangle()
+            .path(in: cropFrame)
+            .stroke(themeTeal.opacity(0.92), lineWidth: 2)
+
+        Path { path in
+            path.move(to: CGPoint(x: cropFrame.minX + (cropFrame.width / 3), y: cropFrame.minY))
+            path.addLine(to: CGPoint(x: cropFrame.minX + (cropFrame.width / 3), y: cropFrame.maxY))
+            path.move(to: CGPoint(x: cropFrame.minX + ((cropFrame.width / 3) * 2), y: cropFrame.minY))
+            path.addLine(to: CGPoint(x: cropFrame.minX + ((cropFrame.width / 3) * 2), y: cropFrame.maxY))
+            path.move(to: CGPoint(x: cropFrame.minX, y: cropFrame.minY + (cropFrame.height / 3)))
+            path.addLine(to: CGPoint(x: cropFrame.maxX, y: cropFrame.minY + (cropFrame.height / 3)))
+            path.move(to: CGPoint(x: cropFrame.minX, y: cropFrame.minY + ((cropFrame.height / 3) * 2)))
+            path.addLine(to: CGPoint(x: cropFrame.maxX, y: cropFrame.minY + ((cropFrame.height / 3) * 2)))
+        }
+        .stroke(themeTeal.opacity(0.24), lineWidth: 1)
+
+        cropCornerGuides(for: cropFrame)
+
+        Text(selectedCropAspectPreset.title)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(themeBackgroundBottom)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(themeTeal.opacity(0.96), in: Capsule())
+            .position(x: cropFrame.minX + 44, y: max(cropFrame.minY - 16, 16))
+
+        Color.clear
+            .frame(width: cropFrame.width, height: cropFrame.height)
+            .contentShape(Rectangle())
+            .position(x: cropFrame.midX, y: cropFrame.midY)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        handleCropMoveChanged(value, imageFrame: imageFrame)
+                    }
+                    .onEnded { _ in
+                        cropMoveStartRect = nil
+                    }
+            )
+
+        ForEach(CropHandle.allCases) { handle in
+            cropHandleView(handle, cropFrame: cropFrame, imageFrame: imageFrame)
+        }
+    }
+
+    private func cropCornerGuides(for cropFrame: CGRect) -> some View {
+        let cornerLength = min(28, min(cropFrame.width, cropFrame.height) * 0.16)
+
+        return Path { path in
+            path.move(to: CGPoint(x: cropFrame.minX, y: cropFrame.minY + cornerLength))
+            path.addLine(to: CGPoint(x: cropFrame.minX, y: cropFrame.minY))
+            path.addLine(to: CGPoint(x: cropFrame.minX + cornerLength, y: cropFrame.minY))
+
+            path.move(to: CGPoint(x: cropFrame.maxX - cornerLength, y: cropFrame.minY))
+            path.addLine(to: CGPoint(x: cropFrame.maxX, y: cropFrame.minY))
+            path.addLine(to: CGPoint(x: cropFrame.maxX, y: cropFrame.minY + cornerLength))
+
+            path.move(to: CGPoint(x: cropFrame.minX, y: cropFrame.maxY - cornerLength))
+            path.addLine(to: CGPoint(x: cropFrame.minX, y: cropFrame.maxY))
+            path.addLine(to: CGPoint(x: cropFrame.minX + cornerLength, y: cropFrame.maxY))
+
+            path.move(to: CGPoint(x: cropFrame.maxX - cornerLength, y: cropFrame.maxY))
+            path.addLine(to: CGPoint(x: cropFrame.maxX, y: cropFrame.maxY))
+            path.addLine(to: CGPoint(x: cropFrame.maxX, y: cropFrame.maxY - cornerLength))
+        }
+        .stroke(themePink.opacity(0.92), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+    }
+
+    private func cropHandleView(_ handle: CropHandle, cropFrame: CGRect, imageFrame: CGRect) -> some View {
+        let handlePosition = cropHandlePosition(handle, in: cropFrame)
+
+        return Circle()
+            .fill(themePink)
+            .frame(width: 18, height: 18)
+            .overlay(Circle().stroke(themeBackgroundBottom.opacity(0.85), lineWidth: 2))
+            .contentShape(Rectangle().inset(by: -18))
+            .position(handlePosition)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        handleCropResizeChanged(value, handle: handle, imageFrame: imageFrame)
+                    }
+                    .onEnded { _ in
+                        cropResizeStartRect = nil
+                    }
+            )
+    }
+
     @ViewBuilder
     private func collapsibleSection<Content: View>(
         _ group: EffectGroup,
@@ -491,12 +756,20 @@ struct ImageEditorView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
+                let wasCropEditing = isCropEditing
                 withAnimation(.easeInOut(duration: 0.18)) {
                     if expandedGroups.contains(group) {
                         expandedGroups.remove(group)
                     } else {
                         expandedGroups = [group]
                     }
+                }
+                let isNowCropEditing = expandedGroups.contains(.crop)
+                if !wasCropEditing && isNowCropEditing {
+                    syncDraftCropFromApplied()
+                    schedulePreviewRender()
+                } else if wasCropEditing != isNowCropEditing {
+                    schedulePreviewRender()
                 }
             } label: {
                 HStack(spacing: 10) {
@@ -556,6 +829,311 @@ struct ImageEditorView: View {
         .padding(.vertical, 2)
     }
 
+    private var isCurrentCropFullFrame: Bool {
+        isFullFrameCropRect(cropRectNormalized)
+    }
+
+    private var isCropEditing: Bool {
+        expandedGroups.contains(.crop)
+    }
+
+    private var currentPreviewDisplayAspectRatio: CGFloat {
+        guard let importedPhoto else { return 4.0 / 3.0 }
+        guard !isCropEditing, let appliedCropRectNormalized else { return importedPhoto.aspectRatio }
+        return croppedDisplayAspectRatio(for: appliedCropRectNormalized, imageAspectRatio: importedPhoto.aspectRatio)
+    }
+
+    private func applyCropPreset(_ preset: CropAspectPreset) {
+        selectedCropAspectPreset = preset
+        cropRectNormalized = resolvedCropRect(
+            for: preset,
+            preservingCenter: CGPoint(x: cropRectNormalized.midX, y: cropRectNormalized.midY)
+        )
+        cropMoveStartRect = nil
+        cropResizeStartRect = nil
+    }
+
+    private func resetCropState() {
+        selectedCropAspectPreset = .original
+        appliedCropAspectPreset = .original
+        cropRectNormalized = CGRect(x: 0, y: 0, width: 1, height: 1)
+        appliedCropRectNormalized = nil
+        cropMoveStartRect = nil
+        cropResizeStartRect = nil
+    }
+
+    private func resetCropDraft() {
+        selectedCropAspectPreset = .original
+        cropRectNormalized = CGRect(x: 0, y: 0, width: 1, height: 1)
+        cropMoveStartRect = nil
+        cropResizeStartRect = nil
+    }
+
+    private func applyCropDraft() {
+        appliedCropRectNormalized = isCurrentCropFullFrame ? nil : cropRectNormalized
+        appliedCropAspectPreset = isCurrentCropFullFrame ? .original : selectedCropAspectPreset
+        cropMoveStartRect = nil
+        cropResizeStartRect = nil
+        withAnimation(.easeInOut(duration: 0.18)) {
+            expandedGroups = [.base]
+        }
+        schedulePreviewRender()
+    }
+
+    private func syncDraftCropFromApplied() {
+        cropRectNormalized = appliedCropRectNormalized ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        selectedCropAspectPreset = appliedCropAspectPreset
+        cropMoveStartRect = nil
+        cropResizeStartRect = nil
+    }
+
+    private func handleCropMoveChanged(_ value: DragGesture.Value, imageFrame: CGRect) {
+        guard imageFrame.width > 0, imageFrame.height > 0 else { return }
+        let startRect = cropMoveStartRect ?? cropRectNormalized
+        if cropMoveStartRect == nil {
+            cropMoveStartRect = startRect
+        }
+
+        let dx = value.translation.width / imageFrame.width
+        let dy = value.translation.height / imageFrame.height
+        let translated = startRect.offsetBy(dx: dx, dy: dy)
+        cropRectNormalized = clampedCropRect(translated)
+    }
+
+    private func handleCropResizeChanged(
+        _ value: DragGesture.Value,
+        handle: CropHandle,
+        imageFrame: CGRect
+    ) {
+        guard imageFrame.width > 0, imageFrame.height > 0 else { return }
+        let startRect = cropResizeStartRect ?? cropRectNormalized
+        if cropResizeStartRect == nil {
+            cropResizeStartRect = startRect
+        }
+
+        let translation = CGSize(
+            width: value.translation.width / imageFrame.width,
+            height: value.translation.height / imageFrame.height
+        )
+        cropRectNormalized = resizedCropRect(
+            from: startRect,
+            handle: handle,
+            translation: translation
+        )
+    }
+
+    private func resolvedCropRect(
+        for preset: CropAspectPreset,
+        preservingCenter center: CGPoint
+    ) -> CGRect {
+        let aspectRatio = targetCropAspectRatio(for: preset)
+        return centeredCropRect(targetAspectRatio: aspectRatio, center: center)
+    }
+
+    private var currentTargetCropAspectRatio: CGFloat {
+        targetCropAspectRatio(for: selectedCropAspectPreset)
+    }
+
+    private var currentNormalizedCropAspectRatio: CGFloat {
+        normalizedCropAspectRatio(for: currentTargetCropAspectRatio)
+    }
+
+    private func targetCropAspectRatio(for preset: CropAspectPreset) -> CGFloat {
+        guard let importedPhoto else { return preset.aspectRatio ?? 1 }
+        return preset.aspectRatio ?? importedPhoto.aspectRatio
+    }
+
+    private func normalizedCropAspectRatio(for targetAspectRatio: CGFloat) -> CGFloat {
+        guard let importedPhoto else { return max(targetAspectRatio, 0.1) }
+        let imageAspectRatio = max(importedPhoto.aspectRatio, 0.1)
+        return max(targetAspectRatio / imageAspectRatio, 0.0001)
+    }
+
+    private func centeredCropRect(targetAspectRatio: CGFloat, center: CGPoint) -> CGRect {
+        let ratio = normalizedCropAspectRatio(for: targetAspectRatio)
+        let fullWidthLimitedHeight = 1 / ratio
+        let size: CGSize
+        if fullWidthLimitedHeight <= 1 {
+            size = CGSize(width: 1, height: fullWidthLimitedHeight)
+        } else {
+            size = CGSize(width: ratio, height: 1)
+        }
+
+        let centered = CGRect(
+            x: center.x - (size.width / 2),
+            y: center.y - (size.height / 2),
+            width: size.width,
+            height: size.height
+        )
+        return clampedCropRect(centered)
+    }
+
+    private func clampedCropRect(_ rect: CGRect) -> CGRect {
+        let aspectRatio = currentNormalizedCropAspectRatio
+        let minSize = minimumCropSize(forNormalizedAspectRatio: aspectRatio)
+        let maxSize = maximumCropSize(forNormalizedAspectRatio: aspectRatio)
+        var width = min(max(rect.width, minSize.width), maxSize.width)
+        var height = min(max(rect.height, minSize.height), maxSize.height)
+
+        if aspectRatio > 0.0001 {
+            if width / height > aspectRatio {
+                width = min(max(height * aspectRatio, minSize.width), maxSize.width)
+                height = width / aspectRatio
+            } else {
+                height = min(max(width / aspectRatio, minSize.height), maxSize.height)
+                width = height * aspectRatio
+            }
+        }
+
+        let maxX = max(0, 1 - width)
+        let maxY = max(0, 1 - height)
+        return CGRect(
+            x: min(max(rect.origin.x, 0), maxX),
+            y: min(max(rect.origin.y, 0), maxY),
+            width: width,
+            height: height
+        )
+    }
+
+    private func minimumCropSize(forNormalizedAspectRatio aspectRatio: CGFloat) -> CGSize {
+        let ratio = max(aspectRatio, 0.0001)
+        let minShortEdge: CGFloat = 0.18
+        let width = min(1, max(minShortEdge, minShortEdge * ratio))
+        let height = min(1, max(minShortEdge, minShortEdge / ratio))
+        return CGSize(width: width, height: height)
+    }
+
+    private func maximumCropSize(forNormalizedAspectRatio aspectRatio: CGFloat) -> CGSize {
+        let ratio = max(aspectRatio, 0.0001)
+        let fullWidthHeight = 1 / ratio
+        if fullWidthHeight <= 1 {
+            return CGSize(width: 1, height: fullWidthHeight)
+        }
+        return CGSize(width: ratio, height: 1)
+    }
+
+    private func cropFrame(in imageFrame: CGRect) -> CGRect {
+        CGRect(
+            x: imageFrame.minX + (cropRectNormalized.minX * imageFrame.width),
+            y: imageFrame.minY + (cropRectNormalized.minY * imageFrame.height),
+            width: cropRectNormalized.width * imageFrame.width,
+            height: cropRectNormalized.height * imageFrame.height
+        )
+    }
+
+    private func croppedDisplayAspectRatio(for normalizedRect: CGRect, imageAspectRatio: CGFloat) -> CGFloat {
+        let safeImageAspect = max(imageAspectRatio, 0.1)
+        let safeHeight = max(normalizedRect.height, 0.0001)
+        let safeWidth = max(normalizedRect.width, 0.0001)
+        return safeImageAspect * (safeWidth / safeHeight)
+    }
+
+    private func cropHandlePosition(_ handle: CropHandle, in cropFrame: CGRect) -> CGPoint {
+        switch handle {
+        case .topLeading:
+            return CGPoint(x: cropFrame.minX, y: cropFrame.minY)
+        case .topTrailing:
+            return CGPoint(x: cropFrame.maxX, y: cropFrame.minY)
+        case .bottomLeading:
+            return CGPoint(x: cropFrame.minX, y: cropFrame.maxY)
+        case .bottomTrailing:
+            return CGPoint(x: cropFrame.maxX, y: cropFrame.maxY)
+        }
+    }
+
+    private func resizedCropRect(
+        from startRect: CGRect,
+        handle: CropHandle,
+        translation: CGSize
+    ) -> CGRect {
+        let aspectRatio = currentNormalizedCropAspectRatio
+        let minSize = minimumCropSize(forNormalizedAspectRatio: aspectRatio)
+
+        let anchor: CGPoint
+        let rawMovingPoint: CGPoint
+        switch handle {
+        case .topLeading:
+            anchor = CGPoint(x: startRect.maxX, y: startRect.maxY)
+            rawMovingPoint = CGPoint(x: startRect.minX + translation.width, y: startRect.minY + translation.height)
+        case .topTrailing:
+            anchor = CGPoint(x: startRect.minX, y: startRect.maxY)
+            rawMovingPoint = CGPoint(x: startRect.maxX + translation.width, y: startRect.minY + translation.height)
+        case .bottomLeading:
+            anchor = CGPoint(x: startRect.maxX, y: startRect.minY)
+            rawMovingPoint = CGPoint(x: startRect.minX + translation.width, y: startRect.maxY + translation.height)
+        case .bottomTrailing:
+            anchor = CGPoint(x: startRect.minX, y: startRect.minY)
+            rawMovingPoint = CGPoint(x: startRect.maxX + translation.width, y: startRect.maxY + translation.height)
+        }
+
+        let availableWidth: CGFloat
+        let availableHeight: CGFloat
+        switch handle {
+        case .topLeading:
+            availableWidth = anchor.x
+            availableHeight = anchor.y
+        case .topTrailing:
+            availableWidth = 1 - anchor.x
+            availableHeight = anchor.y
+        case .bottomLeading:
+            availableWidth = anchor.x
+            availableHeight = 1 - anchor.y
+        case .bottomTrailing:
+            availableWidth = 1 - anchor.x
+            availableHeight = 1 - anchor.y
+        }
+
+        let rawWidth = max(abs(anchor.x - rawMovingPoint.x), minSize.width)
+        let rawHeight = max(abs(anchor.y - rawMovingPoint.y), minSize.height)
+
+        var width = min(rawWidth, rawHeight * aspectRatio)
+        var height = width / aspectRatio
+        if height < minSize.height {
+            height = minSize.height
+            width = height * aspectRatio
+        }
+
+        let maxWidth = min(availableWidth, availableHeight * aspectRatio)
+        let maxHeight = maxWidth / aspectRatio
+        width = min(width, maxWidth)
+        height = min(height, maxHeight)
+
+        let rect: CGRect
+        switch handle {
+        case .topLeading:
+            rect = CGRect(x: anchor.x - width, y: anchor.y - height, width: width, height: height)
+        case .topTrailing:
+            rect = CGRect(x: anchor.x, y: anchor.y - height, width: width, height: height)
+        case .bottomLeading:
+            rect = CGRect(x: anchor.x - width, y: anchor.y, width: width, height: height)
+        case .bottomTrailing:
+            rect = CGRect(x: anchor.x, y: anchor.y, width: width, height: height)
+        }
+
+        return clampedCropRect(rect)
+    }
+
+    private func aspectFitRect(for imageSize: CGSize, in bounds: CGRect) -> CGRect {
+        let imageWidth = max(imageSize.width, 1)
+        let imageHeight = max(imageSize.height, 1)
+        let scale = min(bounds.width / imageWidth, bounds.height / imageHeight)
+        let width = imageWidth * scale
+        let height = imageHeight * scale
+        return CGRect(
+            x: bounds.midX - (width / 2),
+            y: bounds.midY - (height / 2),
+            width: width,
+            height: height
+        )
+    }
+
+    private func isFullFrameCropRect(_ rect: CGRect) -> Bool {
+        abs(rect.minX) < 0.0005 &&
+            abs(rect.minY) < 0.0005 &&
+            abs(rect.width - 1) < 0.0005 &&
+            abs(rect.height - 1) < 0.0005
+    }
+
     private func effectBinding(_ keyPath: WritableKeyPath<PhotoEffectSettings, Double>) -> Binding<Double> {
         Binding(
             get: { editorSettings[keyPath: keyPath] },
@@ -610,10 +1188,12 @@ struct ImageEditorView: View {
                     settings: .neutral,
                     preferredProcessingSource: imported.processingSource,
                     maxDimension: Self.interactivePreviewMaxDimension,
-                    includeGrain: false
+                    includeGrain: false,
+                    cropRectNormalized: nil
                 )
             }.value
             importedPhoto = imported
+            resetCropState()
             previewSourceImage = sourcePreview
             renderedPreviewImage = sourcePreview
             schedulePreviewRender()
@@ -629,6 +1209,7 @@ struct ImageEditorView: View {
         }
 
         let settings = editorSettings.clamped()
+        let cropRectForPreview = isCropEditing ? nil : appliedCropRectNormalized
         previewRenderGeneration &+= 1
         let generation = previewRenderGeneration
 
@@ -643,7 +1224,8 @@ struct ImageEditorView: View {
                     from: sourcePreviewImage,
                     settings: settings,
                     maxDimension: Self.interactivePreviewMaxDimension,
-                    includeGrain: true
+                    includeGrain: true,
+                    cropRectNormalized: cropRectForPreview
                 )
             } else {
                 rendered = Self.previewProcessor.renderImportedPreview(
@@ -652,7 +1234,8 @@ struct ImageEditorView: View {
                     settings: settings,
                     preferredProcessingSource: importedPhoto.processingSource,
                     maxDimension: Self.interactivePreviewMaxDimension,
-                    includeGrain: true
+                    includeGrain: true,
+                    cropRectNormalized: cropRectForPreview
                 )
             }
             guard !Task.isCancelled else { return }
@@ -672,6 +1255,7 @@ struct ImageEditorView: View {
         let quality = min(max(exportQuality, 0.4), 1.0)
         let bitDepth = cameraService.styledHEIFBitDepth
         let outputFormat = exportFormat
+        let cropRectForExport = appliedCropRectNormalized
         let rendered = await Task.detached(priority: .userInitiated) {
             Self.exportProcessor.renderProcessedImageData(
                 rawData: importedPhoto.rawData,
@@ -680,7 +1264,8 @@ struct ImageEditorView: View {
                 preferredHEIFBitDepth: bitDepth,
                 preferredHEIFCompressionQuality: quality,
                 preferredProcessingSource: importedPhoto.processingSource,
-                preferredOutputFormat: outputFormat
+                preferredOutputFormat: outputFormat,
+                cropRectNormalized: cropRectForExport
             )
         }.value
 
@@ -898,7 +1483,8 @@ struct ImageEditorView: View {
             rawData: rawData,
             processedData: processedData,
             processingSource: rawData != nil ? .proRAW : .processed,
-            pixelSize: metadataPixelSize(from: asset) ?? CGSize(width: 1, height: 1),
+            pixelSize: resolvedPixelSize(rawData: rawData, processedData: processedData) ?? metadataPixelSize(from: asset) ?? CGSize(width: 1, height: 1),
+            displayAspectRatio: resolvedDisplayAspectRatio(rawData: rawData, processedData: processedData) ?? aspectRatio(from: metadataPixelSize(from: asset)) ?? 1,
             originalFilename: metadataFilename(from: asset)
         )
     }
@@ -920,6 +1506,7 @@ struct ImageEditorView: View {
                 processedData: nil,
                 processingSource: .proRAW,
                 pixelSize: resolvedPixelSize ?? pixelSize(from: rawData) ?? CGSize(width: 1, height: 1),
+                displayAspectRatio: resolvedDisplayAspectRatio(rawData: rawData, processedData: nil) ?? aspectRatio(from: resolvedPixelSize ?? pixelSize(from: rawData)) ?? 1,
                 originalFilename: resolvedFilename
             )
         }
@@ -934,6 +1521,7 @@ struct ImageEditorView: View {
             processedData: processedData,
             processingSource: .processed,
             pixelSize: resolvedPixelSize ?? pixelSize(from: processedData) ?? CGSize(width: 1, height: 1),
+            displayAspectRatio: resolvedDisplayAspectRatio(rawData: nil, processedData: processedData) ?? aspectRatio(from: resolvedPixelSize ?? pixelSize(from: processedData)) ?? 1,
             originalFilename: resolvedFilename
         )
     }
@@ -1039,6 +1627,53 @@ struct ImageEditorView: View {
         }
 
         return nil
+    }
+
+    nonisolated private static func resolvedPixelSize(rawData: Data?, processedData: Data?) -> CGSize? {
+        guard let data = processedData ?? rawData else { return nil }
+        return pixelSize(from: data)
+    }
+
+    nonisolated private static func resolvedDisplayAspectRatio(rawData: Data?, processedData: Data?) -> CGFloat? {
+        return displayAspectRatio(from: processedData ?? rawData ?? nil)
+    }
+
+    nonisolated private static func displayAspectRatio(from data: Data?) -> CGFloat? {
+        guard let data else { return nil }
+
+        if let source = CGImageSourceCreateWithData(data as CFData, nil),
+           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+           let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+           width > 0,
+           height > 0 {
+            let orientationRawValue = (properties[kCGImagePropertyOrientation] as? UInt32).flatMap(CGImagePropertyOrientation.init(rawValue:))
+            let shouldSwapAxes = orientationRawValue.map {
+                switch $0 {
+                case .left, .leftMirrored, .right, .rightMirrored:
+                    return true
+                default:
+                    return false
+                }
+            } ?? false
+            let displayWidth = shouldSwapAxes ? height : width
+            let displayHeight = shouldSwapAxes ? width : height
+            guard displayHeight > 0 else { return nil }
+            return displayWidth / displayHeight
+        }
+
+        if let image = CIImage(data: data, options: [.applyOrientationProperty: true]) {
+            let extent = image.extent.integral
+            guard extent.width > 0, extent.height > 0 else { return nil }
+            return extent.width / extent.height
+        }
+
+        return nil
+    }
+
+    nonisolated private static func aspectRatio(from size: CGSize?) -> CGFloat? {
+        guard let size, size.width > 0, size.height > 0 else { return nil }
+        return size.width / size.height
     }
 }
 

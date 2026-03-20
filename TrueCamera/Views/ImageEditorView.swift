@@ -55,6 +55,7 @@ struct ImageEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var importedPhoto: ImportedPhoto?
+    @State private var previewSourceImage: UIImage?
     @State private var editorSettings: PhotoEffectSettings
     @State private var renderedPreviewImage: UIImage?
     @State private var previewRenderTask: Task<Void, Never>?
@@ -79,7 +80,8 @@ struct ImageEditorView: View {
 
     nonisolated private static let previewProcessor = PhotoEffectsProcessor()
     nonisolated private static let exportProcessor = PhotoEffectsProcessor()
-    nonisolated private static let previewDebounceNanoseconds: UInt64 = 16_000_000
+    nonisolated private static let previewDebounceNanoseconds: UInt64 = 8_000_000
+    nonisolated private static let interactivePreviewMaxDimension: CGFloat = 1200
 
     init(cameraService: CameraService, initialSettings: PhotoEffectSettings) {
         self.cameraService = cameraService
@@ -173,6 +175,7 @@ struct ImageEditorView: View {
             previewRenderGeneration &+= 1
             previewRenderTask?.cancel()
             previewRenderTask = nil
+            previewSourceImage = nil
         }
     }
 
@@ -600,8 +603,19 @@ struct ImageEditorView: View {
 
         do {
             let imported = try await Self.loadImportedPhoto(from: result)
+            let sourcePreview = await Task.detached(priority: .userInitiated) {
+                Self.previewProcessor.renderImportedPreview(
+                    rawData: imported.rawData,
+                    processedData: imported.processedData,
+                    settings: .neutral,
+                    preferredProcessingSource: imported.processingSource,
+                    maxDimension: Self.interactivePreviewMaxDimension,
+                    includeGrain: false
+                )
+            }.value
             importedPhoto = imported
-            renderedPreviewImage = nil
+            previewSourceImage = sourcePreview
+            renderedPreviewImage = sourcePreview
             schedulePreviewRender()
         } catch {
             alertMessage = error.localizedDescription
@@ -619,17 +633,28 @@ struct ImageEditorView: View {
         let generation = previewRenderGeneration
 
         previewRenderTask?.cancel()
+        let sourcePreviewImage = previewSourceImage
         previewRenderTask = Task.detached(priority: .userInitiated) {
             try? await Task.sleep(nanoseconds: Self.previewDebounceNanoseconds)
             guard !Task.isCancelled else { return }
-            let rendered = Self.previewProcessor.renderImportedPreview(
-                rawData: importedPhoto.rawData,
-                processedData: importedPhoto.processedData,
-                settings: settings,
-                preferredProcessingSource: importedPhoto.processingSource,
-                maxDimension: 1500,
-                includeGrain: false
-            )
+            let rendered: UIImage?
+            if let sourcePreviewImage {
+                rendered = Self.previewProcessor.renderReferencePreview(
+                    from: sourcePreviewImage,
+                    settings: settings,
+                    maxDimension: Self.interactivePreviewMaxDimension,
+                    includeGrain: true
+                )
+            } else {
+                rendered = Self.previewProcessor.renderImportedPreview(
+                    rawData: importedPhoto.rawData,
+                    processedData: importedPhoto.processedData,
+                    settings: settings,
+                    preferredProcessingSource: importedPhoto.processingSource,
+                    maxDimension: Self.interactivePreviewMaxDimension,
+                    includeGrain: true
+                )
+            }
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard generation == previewRenderGeneration else { return }
@@ -840,16 +865,19 @@ struct ImageEditorView: View {
     }
 
     nonisolated private static func loadImportedPhoto(from result: PHPickerResult) async throws -> ImportedPhoto {
-        if let assetIdentifier = result.assetIdentifier,
-           let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetIdentifier], options: nil).firstObject {
-            do {
-                return try await loadImportedPhoto(from: asset)
-            } catch {
-                // Fall back to the picker provider if direct asset-resource access fails.
-            }
-        }
+        let selectedAsset: PHAsset? = {
+            guard let assetIdentifier = result.assetIdentifier else { return nil }
+            return PHAsset.fetchAssets(withLocalIdentifiers: [assetIdentifier], options: nil).firstObject
+        }()
 
-        return try await loadImportedPhoto(from: result.itemProvider)
+        do {
+            return try await loadImportedPhoto(from: result.itemProvider, asset: selectedAsset)
+        } catch {
+            if let selectedAsset {
+                return try await loadImportedPhoto(from: selectedAsset)
+            }
+            throw error
+        }
     }
 
     nonisolated private static func loadImportedPhoto(from asset: PHAsset) async throws -> ImportedPhoto {
@@ -870,12 +898,17 @@ struct ImageEditorView: View {
             rawData: rawData,
             processedData: processedData,
             processingSource: rawData != nil ? .proRAW : .processed,
-            pixelSize: CGSize(width: max(asset.pixelWidth, 1), height: max(asset.pixelHeight, 1)),
-            originalFilename: rawResource?.originalFilename ?? processedResource?.originalFilename
+            pixelSize: metadataPixelSize(from: asset) ?? CGSize(width: 1, height: 1),
+            originalFilename: metadataFilename(from: asset)
         )
     }
 
-    nonisolated private static func loadImportedPhoto(from itemProvider: NSItemProvider) async throws -> ImportedPhoto {
+    nonisolated private static func loadImportedPhoto(
+        from itemProvider: NSItemProvider,
+        asset: PHAsset?
+    ) async throws -> ImportedPhoto {
+        let resolvedPixelSize = metadataPixelSize(from: asset)
+        let resolvedFilename = metadataFilename(from: asset)
         let rawTypeIdentifier = itemProvider.registeredTypeIdentifiers.first(where: { typeIdentifier in
             UTType(typeIdentifier)?.conforms(to: .rawImage) == true
         })
@@ -886,8 +919,8 @@ struct ImageEditorView: View {
                 rawData: rawData,
                 processedData: nil,
                 processingSource: .proRAW,
-                pixelSize: pixelSize(from: rawData) ?? CGSize(width: 1, height: 1),
-                originalFilename: nil
+                pixelSize: resolvedPixelSize ?? pixelSize(from: rawData) ?? CGSize(width: 1, height: 1),
+                originalFilename: resolvedFilename
             )
         }
 
@@ -900,9 +933,22 @@ struct ImageEditorView: View {
             rawData: nil,
             processedData: processedData,
             processingSource: .processed,
-            pixelSize: pixelSize(from: processedData) ?? CGSize(width: 1, height: 1),
-            originalFilename: nil
+            pixelSize: resolvedPixelSize ?? pixelSize(from: processedData) ?? CGSize(width: 1, height: 1),
+            originalFilename: resolvedFilename
         )
+    }
+
+    nonisolated private static func metadataPixelSize(from asset: PHAsset?) -> CGSize? {
+        guard let asset else { return nil }
+        let width = CGFloat(asset.pixelWidth)
+        let height = CGFloat(asset.pixelHeight)
+        guard width > 0, height > 0 else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
+    nonisolated private static func metadataFilename(from asset: PHAsset?) -> String? {
+        guard let asset else { return nil }
+        return PHAssetResource.assetResources(for: asset).first?.originalFilename
     }
 
     nonisolated private static func preferredRawResource(from resources: [PHAssetResource]) -> PHAssetResource? {

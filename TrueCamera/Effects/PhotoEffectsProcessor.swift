@@ -6,6 +6,27 @@ import UIKit
 import simd
 import CoreGraphics
 
+nonisolated enum ProcessedImageExportFormat: String, CaseIterable, Identifiable, Sendable {
+    case heic
+    case jpeg
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .heic: return "HEIC"
+        case .jpeg: return "JPEG"
+        }
+    }
+
+    var uniformTypeIdentifier: String {
+        switch self {
+        case .heic: return "public.heic"
+        case .jpeg: return "public.jpeg"
+        }
+    }
+}
+
 nonisolated private struct ColorCubeKey: Hashable {
     let hsl: HSLAdjustments
     let grading: ColorGradingSettings
@@ -96,11 +117,13 @@ final class PhotoEffectsProcessor {
         settings: PhotoEffectSettings,
         preferredHEIFBitDepth: StyledHEIFBitDepth = .tenBit,
         preferredHEIFCompressionQuality: Double = 1.0,
-        preferredProcessingSource: StyledProcessingSource = .proRAW
+        preferredProcessingSource: StyledProcessingSource = .proRAW,
+        preferredOutputFormat: ProcessedImageExportFormat = .heic
     ) -> (data: Data, uniformTypeIdentifier: String)? {
         if shouldBypassNeutralProcessing(settings),
            let processedData,
-           let passthroughUTI = detectedPassthroughUTI(for: processedData) {
+           let passthroughUTI = detectedPassthroughUTI(for: processedData),
+           preferredOutputFormat == .heic || passthroughUTI == ProcessedImageExportFormat.jpeg.uniformTypeIdentifier {
             
             return (data: processedData, uniformTypeIdentifier: passthroughUTI)
         }
@@ -127,16 +150,26 @@ final class PhotoEffectsProcessor {
             kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: compressionQuality,
             kCGImageDestinationEmbedThumbnail as CIImageRepresentationOption: true,
         ]
-        if preferredHEIFBitDepth == .tenBit,
-           #available(iOS 15.0, *),
-           let heif10 = try? exportContext.heif10Representation(of: graded, colorSpace: exportColorSpace, options: options) {
-            return (data: heif10, uniformTypeIdentifier: "public.heic")
-        }
-        if let heif = exportContext.heifRepresentation(of: graded, format: .RGBA8, colorSpace: exportColorSpace, options: options) {
-            return (data: heif, uniformTypeIdentifier: "public.heic")
-        }
-        if let jpeg = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: options) {
-            return (data: jpeg, uniformTypeIdentifier: "public.jpeg")
+        switch preferredOutputFormat {
+        case .heic:
+            if preferredHEIFBitDepth == .tenBit,
+               #available(iOS 15.0, *),
+               let heif10 = try? exportContext.heif10Representation(of: graded, colorSpace: exportColorSpace, options: options) {
+                return (data: heif10, uniformTypeIdentifier: ProcessedImageExportFormat.heic.uniformTypeIdentifier)
+            }
+            if let heif = exportContext.heifRepresentation(of: graded, format: .RGBA8, colorSpace: exportColorSpace, options: options) {
+                return (data: heif, uniformTypeIdentifier: ProcessedImageExportFormat.heic.uniformTypeIdentifier)
+            }
+            if let jpeg = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: options) {
+                return (data: jpeg, uniformTypeIdentifier: ProcessedImageExportFormat.jpeg.uniformTypeIdentifier)
+            }
+        case .jpeg:
+            if let jpeg = exportContext.jpegRepresentation(of: graded, colorSpace: exportColorSpace, options: options) {
+                return (data: jpeg, uniformTypeIdentifier: ProcessedImageExportFormat.jpeg.uniformTypeIdentifier)
+            }
+            if let heif = exportContext.heifRepresentation(of: graded, format: .RGBA8, colorSpace: exportColorSpace, options: options) {
+                return (data: heif, uniformTypeIdentifier: ProcessedImageExportFormat.heic.uniformTypeIdentifier)
+            }
         }
         
         return nil
@@ -232,6 +265,38 @@ final class PhotoEffectsProcessor {
             input = CIImage(image: image)
         }
         guard let input else { return nil }
+
+        let graded = apply(
+            to: input,
+            settings: settings,
+            includeGrain: includeGrain,
+            cubeDimension: previewCubeDimension
+        )
+        let extent = graded.extent.integral
+        guard extent.width > 0, extent.height > 0 else { return nil }
+
+        let scale = min(1, maxDimension / max(extent.width, extent.height))
+        let output = scale < 1
+            ? graded.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            : graded
+
+        guard let cgImage = previewContext.createCGImage(output, from: output.extent.integral) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+
+    nonisolated func renderImportedPreview(
+        rawData: Data?,
+        processedData: Data?,
+        settings: PhotoEffectSettings,
+        preferredProcessingSource: StyledProcessingSource = .proRAW,
+        maxDimension: CGFloat = 1400,
+        includeGrain: Bool = false
+    ) -> UIImage? {
+        guard let input = makeExportInputImage(
+            rawData: rawData,
+            processedData: processedData,
+            preferredProcessingSource: preferredProcessingSource
+        ) else { return nil }
 
         let graded = apply(
             to: input,

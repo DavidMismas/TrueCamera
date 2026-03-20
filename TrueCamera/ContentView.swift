@@ -119,6 +119,7 @@ struct ContentView: View {
     @State var controlRotationAngle: Angle = .zero
     @State var showSettingsSheet = false
     @State var showEffectsSheet = false
+    @State var showImageEditor = false
     @State var showLensPicker = false
     @State var renderedReferenceImage: UIImage?
     @State var referenceRenderTask: Task<Void, Never>?
@@ -244,6 +245,8 @@ struct ContentView: View {
                         settingsButton
                         Spacer()
                         effectsButton
+                            .padding(.trailing, 12)
+                        imageEditorButton
                             .padding(.trailing, 12)
                         cameraSwitchButton
                     }
@@ -394,6 +397,12 @@ struct ContentView: View {
         .sheet(isPresented: $showEffectsSheet) {
             effectsSheet
         }
+        .fullScreenCover(isPresented: $showImageEditor) {
+            ImageEditorView(
+                cameraService: cameraService,
+                initialSettings: cameraService.effectSettingsSnapshot()
+            )
+        }
         .onChange(of: showEffectsSheet) { _, isPresented in
             if isPresented {
                 scheduleReferenceRender()
@@ -402,6 +411,13 @@ struct ContentView: View {
                 referenceRenderTask?.cancel()
                 referenceRenderTask = nil
                 renderedReferenceImage = nil
+            }
+        }
+        .onChange(of: showImageEditor) { _, isPresented in
+            if isPresented {
+                cameraService.stopSession()
+            } else if scenePhase == .active {
+                cameraService.startSession()
             }
         }
     }
@@ -577,6 +593,20 @@ struct ContentView: View {
         } label: {
             Image(systemName: "arrow.triangle.2.circlepath.camera")
                 .font(.title2.weight(.semibold))
+                .foregroundStyle(themeTeal)
+                .frame(width: 54, height: 54)
+        }
+        .rotationEffect(controlRotationAngle)
+        .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
+        .buttonStyle(.plain)
+    }
+
+    private var imageEditorButton: some View {
+        Button {
+            showImageEditor = true
+        } label: {
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.title3.weight(.semibold))
                 .foregroundStyle(themeTeal)
                 .frame(width: 54, height: 54)
         }

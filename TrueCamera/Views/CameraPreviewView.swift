@@ -173,8 +173,19 @@ final class PreviewView: UIView {
 
     private func applyRotation(_ angle: CGFloat) {
         guard let connection = videoPreviewLayer.connection else { return }
-        guard connection.isVideoRotationAngleSupported(angle) else { return }
-        connection.videoRotationAngle = angle
+        let correctedAngle = correctedPreviewRotationAngle(for: angle)
+        guard connection.isVideoRotationAngleSupported(correctedAngle) else { return }
+        connection.videoRotationAngle = correctedAngle
+    }
+
+    private func correctedPreviewRotationAngle(for angle: CGFloat) -> CGFloat {
+        guard activeDevice?.position == .front else { return angle }
+        return normalizedRotationAngle(angle + 180)
+    }
+
+    private func normalizedRotationAngle(_ angle: CGFloat) -> CGFloat {
+        let normalized = angle.truncatingRemainder(dividingBy: 360)
+        return normalized < 0 ? normalized + 360 : normalized
     }
 
     private func teardownRotation() {

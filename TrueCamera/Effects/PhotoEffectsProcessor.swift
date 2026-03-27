@@ -80,7 +80,7 @@ final class PhotoEffectsProcessor {
         maxDimension: CGFloat = 960,
         includeGrain: Bool = false
     ) -> UIImage? {
-        let orientation: CGImagePropertyOrientation = isFrontCamera ? .rightMirrored : .right
+        let orientation: CGImagePropertyOrientation = isFrontCamera ? .leftMirrored : .right
         
         // Extract native buffer space if available, fallback to standard sRGB
         let bufferSpace = CVImageBufferGetColorSpace(pixelBuffer)?.takeUnretainedValue() ?? CGColorSpace(name: CGColorSpace.sRGB)

@@ -229,6 +229,13 @@ extension ContentView {
                             tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.shadows.hue)
                         )
                         effectSlider(
+                            title: "Shadows Range",
+                            value: colorGradeCoveragePercentBinding(\.shadowRange),
+                            range: PhotoEffectSettings.colorGradeCoveragePercentRange,
+                            decimals: 0,
+                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.shadows.hue)
+                        )
+                        effectSlider(
                             title: "Midtones Hue",
                             value: colorGradeBinding(\.midtones, \.hue),
                             range: PhotoEffectSettings.colorGradeHueRange,
@@ -250,6 +257,13 @@ extension ContentView {
                             title: "Highlights Amount",
                             value: colorGradeBinding(\.highlights, \.amount),
                             range: PhotoEffectSettings.colorGradeAmountRange,
+                            tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.highlights.hue)
+                        )
+                        effectSlider(
+                            title: "Highlights Range",
+                            value: colorGradeCoveragePercentBinding(\.highlightRange),
+                            range: PhotoEffectSettings.colorGradeCoveragePercentRange,
+                            decimals: 0,
                             tint: gradeTintColor(hue: cameraService.effectSettings.colorGrading.highlights.hue)
                         )
                     }
@@ -449,6 +463,20 @@ extension ContentView {
                     var tone = settings.colorGrading[keyPath: toneKeyPath]
                     tone[keyPath: valueKeyPath] = nextValue
                     settings.colorGrading[keyPath: toneKeyPath] = tone
+                }
+                scheduleReferenceRender()
+            }
+        )
+    }
+
+    func colorGradeCoveragePercentBinding(
+        _ keyPath: WritableKeyPath<ColorGradingSettings, Double>
+    ) -> Binding<Double> {
+        Binding(
+            get: { cameraService.effectSettings.colorGrading[keyPath: keyPath] * 100 },
+            set: { nextValue in
+                cameraService.updateEffectSetting { settings in
+                    settings.colorGrading[keyPath: keyPath] = nextValue / 100
                 }
                 scheduleReferenceRender()
             }

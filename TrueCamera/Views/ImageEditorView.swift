@@ -403,6 +403,13 @@ struct ImageEditorView: View {
                     tint: gradeTintColor(hue: editorSettings.colorGrading.shadows.hue)
                 )
                 effectSlider(
+                    title: "Shadows Range",
+                    value: colorGradeCoveragePercentBinding(\.shadowRange),
+                    range: PhotoEffectSettings.colorGradeCoveragePercentRange,
+                    decimals: 0,
+                    tint: gradeTintColor(hue: editorSettings.colorGrading.shadows.hue)
+                )
+                effectSlider(
                     title: "Midtones Hue",
                     value: colorGradeBinding(\.midtones, \.hue),
                     range: PhotoEffectSettings.colorGradeHueRange,
@@ -424,6 +431,13 @@ struct ImageEditorView: View {
                     title: "Highlights Amount",
                     value: colorGradeBinding(\.highlights, \.amount),
                     range: PhotoEffectSettings.colorGradeAmountRange,
+                    tint: gradeTintColor(hue: editorSettings.colorGrading.highlights.hue)
+                )
+                effectSlider(
+                    title: "Highlights Range",
+                    value: colorGradeCoveragePercentBinding(\.highlightRange),
+                    range: PhotoEffectSettings.colorGradeCoveragePercentRange,
+                    decimals: 0,
                     tint: gradeTintColor(hue: editorSettings.colorGrading.highlights.hue)
                 )
             }
@@ -1169,6 +1183,18 @@ struct ImageEditorView: View {
                 var tone = editorSettings.colorGrading[keyPath: toneKeyPath]
                 tone[keyPath: valueKeyPath] = nextValue
                 editorSettings.colorGrading[keyPath: toneKeyPath] = tone
+                schedulePreviewRender()
+            }
+        )
+    }
+
+    private func colorGradeCoveragePercentBinding(
+        _ keyPath: WritableKeyPath<ColorGradingSettings, Double>
+    ) -> Binding<Double> {
+        Binding(
+            get: { editorSettings.colorGrading[keyPath: keyPath] * 100 },
+            set: { nextValue in
+                editorSettings.colorGrading[keyPath: keyPath] = nextValue / 100
                 schedulePreviewRender()
             }
         )

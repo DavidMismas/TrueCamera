@@ -82,6 +82,8 @@ nonisolated struct ColorGradingSettings: Equatable, Hashable, Codable, Sendable 
     var shadows = ColorGradeTone()
     var midtones = ColorGradeTone()
     var highlights = ColorGradeTone()
+    var shadowRange: Double = 0.10
+    var highlightRange: Double = 0.10
 
     static let neutral = ColorGradingSettings()
 }
@@ -92,6 +94,8 @@ extension ColorGradingSettings {
         case shadows
         case midtones
         case highlights
+        case shadowRange
+        case highlightRange
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -102,6 +106,8 @@ extension ColorGradingSettings {
         shadows = try container.decodeIfPresent(ColorGradeTone.self, forKey: .shadows) ?? defaults.shadows
         midtones = try container.decodeIfPresent(ColorGradeTone.self, forKey: .midtones) ?? defaults.midtones
         highlights = try container.decodeIfPresent(ColorGradeTone.self, forKey: .highlights) ?? defaults.highlights
+        shadowRange = try container.decodeIfPresent(Double.self, forKey: .shadowRange) ?? defaults.shadowRange
+        highlightRange = try container.decodeIfPresent(Double.self, forKey: .highlightRange) ?? defaults.highlightRange
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -110,6 +116,8 @@ extension ColorGradingSettings {
         try container.encode(shadows, forKey: .shadows)
         try container.encode(midtones, forKey: .midtones)
         try container.encode(highlights, forKey: .highlights)
+        try container.encode(shadowRange, forKey: .shadowRange)
+        try container.encode(highlightRange, forKey: .highlightRange)
     }
 }
 
@@ -190,6 +198,8 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
     static let hslLightnessRange: ClosedRange<Double> = -0.35...0.35
     static let colorGradeHueRange: ClosedRange<Double> = -180...180
     static let colorGradeAmountRange: ClosedRange<Double> = 0...1
+    static let colorGradeCoverageRange: ClosedRange<Double> = 0.05...0.25
+    static let colorGradeCoveragePercentRange: ClosedRange<Double> = 5...25
 
     func clamped() -> PhotoEffectSettings {
         func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {
@@ -246,6 +256,8 @@ nonisolated struct PhotoEffectSettings: Equatable, Hashable, Codable, Sendable {
         result.colorGrading.shadows = clampedTone(result.colorGrading.shadows)
         result.colorGrading.midtones = clampedTone(result.colorGrading.midtones)
         result.colorGrading.highlights = clampedTone(result.colorGrading.highlights)
+        result.colorGrading.shadowRange = clamp(result.colorGrading.shadowRange, to: Self.colorGradeCoverageRange)
+        result.colorGrading.highlightRange = clamp(result.colorGrading.highlightRange, to: Self.colorGradeCoverageRange)
         return result
     }
 

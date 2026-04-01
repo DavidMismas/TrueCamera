@@ -969,17 +969,29 @@ final class PhotoEffectsProcessor {
             )
         }
 
-        // Bias shadows toward darker tonal regions and cut them off before the mid-tone band fully ramps in.
+        let shadowRange = clamp(
+            grading.shadowRange,
+            PhotoEffectSettings.colorGradeCoverageRange.lowerBound,
+            PhotoEffectSettings.colorGradeCoverageRange.upperBound
+        )
+        let highlightRange = clamp(
+            grading.highlightRange,
+            PhotoEffectSettings.colorGradeCoverageRange.lowerBound,
+            PhotoEffectSettings.colorGradeCoverageRange.upperBound
+        )
+        let shadowFeather = min(0.12, max(0.04, shadowRange * 0.8))
+        let highlightFeather = min(0.12, max(0.04, highlightRange * 0.8))
+        let highlightStart = 1 - highlightRange
+
+        // Keep shadows/highlights in controllable edge bands and let mid-tones own the remaining center.
         let shadowDeepToneGuard = smoothstep(0.05, 0.18, luminance)
         let shadowDetailGuard = smoothstep(0.03, 0.13, luminance)
         let shadowProtectedWeight = shadowChromaWeight * shadowDeepToneGuard * shadowDetailGuard * highlightGuard
-        let shadowFalloff = 1 - smoothstep(0.14, 0.36, luminance)
-        let shadowMidtoneGuard = 1 - smoothstep(0.24, 0.38, luminance)
-        let shadowWeight = shadowFalloff * shadowMidtoneGuard
-        let midtoneEntry = smoothstep(0.18, 0.38, luminance)
-        let midtoneExit = 1 - smoothstep(0.60, 0.82, luminance)
+        let shadowWeight = 1 - smoothstep(shadowRange, shadowRange + shadowFeather, luminance)
+        let midtoneEntry = smoothstep(shadowRange, shadowRange + shadowFeather, luminance)
+        let midtoneExit = 1 - smoothstep(highlightStart - highlightFeather, highlightStart, luminance)
         let midtoneWeight = midtoneEntry * midtoneExit
-        let highlightWeight = smoothstep(0.45, 0.88, luminance)
+        let highlightWeight = smoothstep(highlightStart - highlightFeather, highlightStart, luminance)
 
         if grading.shadows.amount > 0.0001 {
             output = toneBand(

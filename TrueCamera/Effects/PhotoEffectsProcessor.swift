@@ -969,11 +969,13 @@ final class PhotoEffectsProcessor {
             )
         }
 
-        // Bias shadows toward darker tonal regions and reduce bleed into mid-tones.
+        // Bias shadows toward darker tonal regions and cut them off before the mid-tone band fully ramps in.
         let shadowDeepToneGuard = smoothstep(0.05, 0.18, luminance)
         let shadowDetailGuard = smoothstep(0.03, 0.13, luminance)
         let shadowProtectedWeight = shadowChromaWeight * shadowDeepToneGuard * shadowDetailGuard * highlightGuard
-        let shadowWeight = 1 - smoothstep(0.16, 0.50, luminance)
+        let shadowFalloff = 1 - smoothstep(0.14, 0.36, luminance)
+        let shadowMidtoneGuard = 1 - smoothstep(0.24, 0.38, luminance)
+        let shadowWeight = shadowFalloff * shadowMidtoneGuard
         let midtoneEntry = smoothstep(0.18, 0.38, luminance)
         let midtoneExit = 1 - smoothstep(0.60, 0.82, luminance)
         let midtoneWeight = midtoneEntry * midtoneExit

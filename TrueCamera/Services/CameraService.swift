@@ -244,7 +244,7 @@ final class CameraService: NSObject, ObservableObject {
     @Published var exposureBias: Float = 0 {
         didSet { applyExposureBias() }
     }
-    @Published private(set) var exposureBiasRange: ClosedRange<Float> = -2.0...2.0
+    @Published private(set) var exposureBiasRange: ClosedRange<Float> = -3.0...3.0
     @Published private(set) var livePreviewImage: UIImage?
     @Published private(set) var selectedEffectPresetID: String = PhotoEffectLibrary.customPresetID {
         didSet { UserDefaults.standard.set(selectedEffectPresetID, forKey: PreferenceKey.selectedEffectPresetID) }
@@ -311,7 +311,7 @@ final class CameraService: NSObject, ObservableObject {
     private var prewarmExportWorkItem: DispatchWorkItem?
 
     var activeCaptureBadgeText: String? {
-        appleProRAWActive ? "ProRAW" : nil
+        appleProRAWActive ? "ProRAW" : "Standard"
     }
 
     var isShutterSoundToggleAvailable: Bool {
@@ -751,133 +751,123 @@ final class CameraService: NSObject, ObservableObject {
         var lenses: [CameraLens] = []
 
         if let ultraDevice {
+            let ultraMM = nominalFocalLength(for: ultraDevice)
             lenses.append(
                 CameraLens(
                     id: "\(ultraDevice.position.rawValue)-\(ultraDevice.deviceType.rawValue)",
-                    name: "14mm",
+                    name: focalLengthLabel(ultraMM, fallback: "Ultra Wide"),
                     deviceUniqueID: ultraDevice.uniqueID,
                     deviceType: ultraDevice.deviceType,
                     position: ultraDevice.position,
                     isCropped: false,
                     zoomFactor: 1.0,
-                    sortOrder: 140
+                    sortOrder: focalSortOrder(ultraMM, fallback: 140)
                 )
             )
 
             let ultraCropZoom = 1.5
             let maxUltraZoom = Double(ultraDevice.activeFormat.videoMaxZoomFactor)
-            if maxUltraZoom >= ultraCropZoom {
-                let ultraCropMM = roundedMillimeters(14.0 * ultraCropZoom)
+            if let ultraMM, maxUltraZoom >= ultraCropZoom {
+                let ultraCropMM = ultraMM * ultraCropZoom
                 lenses.append(
                     CameraLens(
                         id: "\(ultraDevice.position.rawValue)-\(ultraDevice.deviceType.rawValue)-ultra-crop",
-                        name: "\(ultraCropMM)mm",
+                        name: focalLengthLabel(ultraCropMM, fallback: "1.5×"),
                         deviceUniqueID: ultraDevice.uniqueID,
                         deviceType: ultraDevice.deviceType,
                         position: ultraDevice.position,
                         isCropped: true,
                         zoomFactor: CGFloat(ultraCropZoom),
-                        sortOrder: ultraCropMM * 10 + 1
+                        sortOrder: focalSortOrder(ultraCropMM, fallback: 210) + 1
                     )
                 )
             }
         }
 
         if let wideDevice {
+            let wideMM = nominalFocalLength(for: wideDevice)
             let pos = wideDevice.position.rawValue
             let type = wideDevice.deviceType.rawValue
             lenses.append(
                 CameraLens(
                     id: "\(pos)-\(type)",
-                    name: "24mm",
+                    name: focalLengthLabel(wideMM, fallback: "Wide"),
                     deviceUniqueID: wideDevice.uniqueID,
                     deviceType: wideDevice.deviceType,
                     position: wideDevice.position,
                     isCropped: false,
                     zoomFactor: 1.0,
-                    sortOrder: 240
+                    sortOrder: focalSortOrder(wideMM, fallback: 240)
                 )
             )
             let maxWideZoom = Double(wideDevice.activeFormat.videoMaxZoomFactor)
-            let crop35Zoom = 35.0 / 24.0
-            let crop50Zoom = 50.0 / 24.0
-            if maxWideZoom >= crop35Zoom {
-                lenses.append(
-                    CameraLens(
-                        id: "\(pos)-\(type)-35mm-crop",
-                        name: "35mm",
-                        deviceUniqueID: wideDevice.uniqueID,
-                        deviceType: wideDevice.deviceType,
-                        position: wideDevice.position,
-                        isCropped: true,
-                        zoomFactor: CGFloat(crop35Zoom),
-                        sortOrder: 350
+            if let wideMM {
+                for targetMM in [35.0, 50.0] {
+                    let cropZoom = targetMM / wideMM
+                    guard cropZoom > 1.0, maxWideZoom >= cropZoom else { continue }
+                    lenses.append(
+                        CameraLens(
+                            id: "\(pos)-\(type)-\(Int(targetMM))mm-crop",
+                            name: focalLengthLabel(targetMM, fallback: "\(cropZoom)×"),
+                            deviceUniqueID: wideDevice.uniqueID,
+                            deviceType: wideDevice.deviceType,
+                            position: wideDevice.position,
+                            isCropped: true,
+                            zoomFactor: CGFloat(cropZoom),
+                            sortOrder: focalSortOrder(targetMM, fallback: 350)
+                        )
                     )
-                )
-            }
-            if maxWideZoom >= crop50Zoom {
-                lenses.append(
-                    CameraLens(
-                        id: "\(pos)-\(type)-50mm-crop",
-                        name: "50mm",
-                        deviceUniqueID: wideDevice.uniqueID,
-                        deviceType: wideDevice.deviceType,
-                        position: wideDevice.position,
-                        isCropped: true,
-                        zoomFactor: CGFloat(crop50Zoom),
-                        sortOrder: 500
-                    )
-                )
+                }
             }
         }
 
         if let teleDevice {
-            let teleMM = inferredTeleEquivalentMM(for: teleDevice, relativeTo: wideDevice)
+            let teleMM = nominalFocalLength(for: teleDevice)
             let pos = teleDevice.position.rawValue
             let type = teleDevice.deviceType.rawValue
             lenses.append(
                 CameraLens(
                     id: "\(pos)-\(type)",
-                    name: "\(teleMM)mm",
+                    name: focalLengthLabel(teleMM, fallback: "Telephoto"),
                     deviceUniqueID: teleDevice.uniqueID,
                     deviceType: teleDevice.deviceType,
                     position: teleDevice.position,
                     isCropped: false,
                     zoomFactor: 1.0,
-                    sortOrder: teleMM * 10
+                    sortOrder: focalSortOrder(teleMM, fallback: 1200)
                 )
             )
 
             let maxTeleZoom = Double(teleDevice.activeFormat.videoMaxZoomFactor)
             let teleCrop15Zoom = 1.5
-            if maxTeleZoom >= teleCrop15Zoom {
-                let teleCrop15MM = roundedMillimeters(Double(teleMM) * teleCrop15Zoom)
+            if let teleMM, maxTeleZoom >= teleCrop15Zoom {
+                let teleCrop15MM = teleMM * teleCrop15Zoom
                 lenses.append(
                     CameraLens(
                         id: "\(pos)-\(type)-tele-1_5x-crop",
-                        name: "\(teleCrop15MM)mm",
+                        name: focalLengthLabel(teleCrop15MM, fallback: "1.5×"),
                         deviceUniqueID: teleDevice.uniqueID,
                         deviceType: teleDevice.deviceType,
                         position: teleDevice.position,
                         isCropped: true,
                         zoomFactor: CGFloat(teleCrop15Zoom),
-                        sortOrder: teleCrop15MM * 10 + 1
+                        sortOrder: focalSortOrder(teleCrop15MM, fallback: 1500) + 1
                     )
                 )
             }
 
-            if maxTeleZoom >= 1.95 {
-                let teleCropMM = roundedMillimeters(Double(teleMM) * 2.0)
+            if let teleMM, maxTeleZoom >= 2.0 {
+                let teleCropMM = teleMM * 2.0
                 lenses.append(
                     CameraLens(
                         id: "\(pos)-\(type)-tele-2x-crop",
-                        name: "\(teleCropMM)mm",
+                        name: focalLengthLabel(teleCropMM, fallback: "2×"),
                         deviceUniqueID: teleDevice.uniqueID,
                         deviceType: teleDevice.deviceType,
                         position: teleDevice.position,
                         isCropped: true,
                         zoomFactor: 2.0,
-                        sortOrder: teleCropMM * 10 + 1
+                        sortOrder: focalSortOrder(teleCropMM, fallback: 2000) + 1
                     )
                 )
             }
@@ -888,13 +878,13 @@ final class CameraService: NSObject, ObservableObject {
             lenses.append(
                 CameraLens(
                     id: "\(fallback.position.rawValue)-\(fallback.deviceType.rawValue)",
-                    name: "24mm",
+                    name: focalLengthLabel(nominalFocalLength(for: fallback), fallback: "Camera"),
                     deviceUniqueID: fallback.uniqueID,
                     deviceType: fallback.deviceType,
                     position: fallback.position,
                     isCropped: false,
                     zoomFactor: 1.0,
-                    sortOrder: 240
+                    sortOrder: focalSortOrder(nominalFocalLength(for: fallback), fallback: 240)
                 )
             )
         }
@@ -1000,8 +990,8 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     private func updateExposureBiasRange(for device: AVCaptureDevice) {
-        let minBias = device.minExposureTargetBias
-        let maxBias = device.maxExposureTargetBias
+        let minBias = max(device.minExposureTargetBias, -3.0)
+        let maxBias = min(device.maxExposureTargetBias, 3.0)
         DispatchQueue.main.async {
             self.exposureBiasRange = minBias...maxBias
             let clamped = min(max(self.exposureBias, minBias), maxBias)
@@ -1134,9 +1124,11 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     private func makePhotoSettings() -> AVCapturePhotoSettings? {
-        guard let rawPixelType = preferredAppleProRAWPixelFormatForCapture() else { return nil }
         let processedFormat: [String: Any] = [AVVideoCodecKey: preferredProcessedCodec()]
-        return AVCapturePhotoSettings(rawPixelFormatType: rawPixelType, processedFormat: processedFormat)
+        if let rawPixelType = preferredAppleProRAWPixelFormatForCapture() {
+            return AVCapturePhotoSettings(rawPixelFormatType: rawPixelType, processedFormat: processedFormat)
+        }
+        return AVCapturePhotoSettings(format: processedFormat)
     }
 
     nonisolated private func shouldSkipProcessedPreview(for settings: PhotoEffectSettings) -> Bool {
@@ -1211,25 +1203,19 @@ final class CameraService: NSObject, ObservableObject {
         }) ?? sorted.last
     }
 
-    private func inferredTeleEquivalentMM(for teleDevice: AVCaptureDevice, relativeTo wideDevice: AVCaptureDevice?) -> Int {
-        let baseWideMM = 24.0
-        guard let wideDevice else {
-            return 120
-        }
-        let wideFOV = Double(wideDevice.activeFormat.videoFieldOfView)
-        let teleFOV = Double(teleDevice.activeFormat.videoFieldOfView)
-        guard wideFOV > 0, teleFOV > 0 else {
-            return 120
-        }
-        let ratio = wideFOV / teleFOV
-        let estimatedMM = baseWideMM * min(max(ratio, 1.8), 8.5)
-        return roundedMillimeters(estimatedMM)
+    private func nominalFocalLength(for device: AVCaptureDevice) -> Double? {
+        let millimeters = Double(device.nominalFocalLengthIn35mmFilm)
+        return millimeters.isFinite && millimeters > 0 ? millimeters : nil
     }
 
-    private func roundedMillimeters(_ value: Double) -> Int {
-        let roundedToFive = (value / 5.0).rounded() * 5.0
-        let clamped = min(max(roundedToFive, 10), 300)
-        return Int(clamped)
+    private func focalLengthLabel(_ millimeters: Double?, fallback: String) -> String {
+        guard let millimeters else { return fallback }
+        return "\(Int(millimeters.rounded()))mm"
+    }
+
+    private func focalSortOrder(_ millimeters: Double?, fallback: Int) -> Int {
+        guard let millimeters else { return fallback }
+        return Int((millimeters * 10).rounded())
     }
 
     private func setupCaptureRotationCoordinator(for device: AVCaptureDevice) {

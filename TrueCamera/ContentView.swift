@@ -1,4 +1,5 @@
 import CoreImage
+import AVKit
 import Photos
 import SwiftUI
 import UniformTypeIdentifiers
@@ -39,7 +40,7 @@ struct ContentView: View {
 
         var title: String {
             switch self {
-            case .capturing: return "Capturing ProRAW"
+            case .capturing: return "Capturing Photo"
             case .processing: return "Developing"
             case .saving: return "Saving"
             case .done: return "Done"
@@ -49,7 +50,7 @@ struct ContentView: View {
 
         var subtitle: String {
             switch self {
-            case .capturing: return "Capturing full-resolution RAW photo"
+            case .capturing: return "Capturing photo"
             case .processing: return "Applying style and tone mapping"
             case .saving: return "Saving to Photos library"
             case .done: return "Photo saved"
@@ -322,6 +323,16 @@ struct ContentView: View {
             }
         }
         .tint(themeTeal)
+        .onCameraCaptureEvent(
+            isEnabled: cameraService.isSessionRunning && scenePhase == .active &&
+                !showSettingsSheet && !showEffectsSheet && !showImageEditor &&
+                !premiumManager.isPaywallPresented && !showLensPicker &&
+                !cameraService.isCaptureInProgress && captureProcessingStage == nil &&
+                !backgroundQueueIsFull
+        ) { event in
+            guard event.phase == .began else { return }
+            triggerCapture()
+        }
         .overlay(alignment: .top) {
             if let statusMessage {
                 Text(statusMessage)
@@ -362,9 +373,6 @@ struct ContentView: View {
         .onDisappear {
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
             captureStageDismissTask?.cancel()
-            backgroundProcessorTask?.cancel()
-            backgroundProcessorTask = nil
-            backgroundProcessingInFlight = false
         }
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
@@ -617,21 +625,7 @@ struct ContentView: View {
 
     private var shutterButton: some View {
         return Button {
-            guard cameraService.isSessionRunning, !cameraService.isCaptureInProgress, captureProcessingStage == nil else { return }
-            guard !backgroundQueueIsFull else {
-                statusMessage = Self.queueFullStatusMessage
-                return
-            }
-            pendingCaptureRequestContext = CaptureRequestContext(
-                effectSettings: cameraService.effectSettingsSnapshot(),
-                heifBitDepth: cameraService.styledHEIFBitDepth,
-                heifCompressionQuality: cameraService.styledHEIFCompressionQuality,
-                processingSource: cameraService.styledProcessingSource,
-                saveRAWToLibrary: cameraService.saveRAWToLibrary
-            )
-            lastCaptureSucceeded = false
-            startCaptureProcessingUI()
-            cameraService.capturePhoto()
+            triggerCapture()
         } label: {
             ZStack {
                 Circle()
@@ -648,6 +642,25 @@ struct ContentView: View {
         .rotationEffect(controlRotationAngle)
         .animation(.easeInOut(duration: 0.2), value: controlRotationAngle)
         .buttonStyle(.plain)
+    }
+
+    private func triggerCapture() {
+        guard cameraService.isSessionRunning, !cameraService.isCaptureInProgress,
+              captureProcessingStage == nil else { return }
+        guard !backgroundQueueIsFull else {
+            statusMessage = Self.queueFullStatusMessage
+            return
+        }
+        pendingCaptureRequestContext = CaptureRequestContext(
+            effectSettings: cameraService.effectSettingsSnapshot(),
+            heifBitDepth: cameraService.styledHEIFBitDepth,
+            heifCompressionQuality: cameraService.styledHEIFCompressionQuality,
+            processingSource: cameraService.styledProcessingSource,
+            saveRAWToLibrary: cameraService.saveRAWToLibrary
+        )
+        lastCaptureSucceeded = false
+        startCaptureProcessingUI()
+        cameraService.capturePhoto()
     }
 
     private var galleryButton: some View {
@@ -720,8 +733,8 @@ struct ContentView: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(themeTextPrimary)
             if lens.isCropped {
-                Text("●")
-                    .font(.system(size: 8, weight: .bold))
+                Text("crop")
+                    .font(.caption2.weight(.semibold))
                     .foregroundStyle(themePink)
             }
         }
@@ -821,11 +834,7 @@ struct ContentView: View {
     private func handleCaptureResult(_ result: CameraCaptureResult) {
         guard result.rawData != nil || result.processedData != nil else {
             finishCaptureProcessingUI(success: false)
-            if let unavailableMessage = unavailableCaptureFormatMessage {
-                statusMessage = unavailableMessage
-            } else {
-                statusMessage = "Capture failed (missing photo data)."
-            }
+            statusMessage = "Capture failed. Please try again."
             lastCaptureSucceeded = false
             pendingCaptureRequestContext = nil
             return
@@ -903,13 +912,6 @@ struct ContentView: View {
         backgroundProcessorTask = nil
         if statusMessage == Self.queueFullStatusMessage {
             statusMessage = nil
-        }
-    }
-
-    private var unavailableCaptureFormatMessage: String? {
-        switch cameraService.captureFormat {
-        case .appleProRAW:
-            return cameraService.appleProRAWActive ? nil : "ProRAW is not available for the selected camera/lens."
         }
     }
 
@@ -1153,7 +1155,11 @@ struct ContentView: View {
     private var photoPermissionDenied: Bool {
         let addOnly = PHPhotoLibrary.authorizationStatus(for: .addOnly)
         let readWrite = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        return addOnly == .denied || addOnly == .restricted || readWrite == .denied || readWrite == .restricted
+        if addOnly == .authorized || readWrite == .authorized || readWrite == .limited {
+            return false
+        }
+        return addOnly == .denied || addOnly == .restricted ||
+            readWrite == .denied || readWrite == .restricted
     }
 
     private func ensurePhotoWriteAuthorization() async -> PHAuthorizationStatus {

@@ -11,7 +11,7 @@ extension ContentView {
                             .foregroundStyle(themeTeal)
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Unlock full-resolution Apple ProRAW capture and unlimited saved presets.")
+                            Text("Unlock full-resolution capture where supported and unlimited saved presets.")
                                 .font(.subheadline)
                             Button("Unlock Grejn Pro") {
                                 premiumManager.presentPaywall(for: .all)
@@ -88,7 +88,10 @@ extension ContentView {
 
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle("Save Original RAW (.dng)", isOn: $cameraService.saveRAWToLibrary)
-                        Text("Keeps the untouched DNG from the camera in your Photos library.")
+                            .disabled(!cameraService.appleProRAWActive)
+                        Text(cameraService.appleProRAWActive
+                             ? "Keeps the untouched DNG from the camera in your Photos library."
+                             : "RAW is unavailable for this camera. Styled photos are still saved.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -204,7 +207,7 @@ extension ContentView {
 
                 if !cameraService.appleProRAWSupported {
                     Section("Compatibility") {
-                        Text("ProRAW is not supported on the current device/lens.")
+                        Text("ProRAW is unavailable for this camera. Grejn will capture and style a standard photo instead.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -229,7 +232,9 @@ extension ContentView {
                     Text("Live Preset Preview: Shows your preset's tone and color adjustments in real time. Grain, bloom, and vignette stay capture-only so preview remains responsive.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Text("Capture uses Apple ProRAW at \(cameraService.resolutionCap.label) resolution.")
+                    Text(cameraService.appleProRAWActive
+                         ? "Capture uses Apple ProRAW at \(cameraService.resolutionCap.label) resolution."
+                         : "Capture uses a standard photo at the available resolution.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Text("If Save Original RAW is on, the untouched DNG is also stored in Photos.")

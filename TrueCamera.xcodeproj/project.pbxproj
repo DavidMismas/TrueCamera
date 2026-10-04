@@ -260,9 +260,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Grejn;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
-				INFOPLIST_KEY_NSCameraUsageDescription = "TrueCamera needs camera access to capture photos.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "TrueCamera saves captured photos to your library.";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "TrueCamera can save captured photos to your library.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Grejn needs camera access to capture photos.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Grejn saves captured photos to your library.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Grejn can save captured photos to your library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -302,9 +302,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Grejn;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
-				INFOPLIST_KEY_NSCameraUsageDescription = "TrueCamera needs camera access to capture photos.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "TrueCamera saves captured photos to your library.";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "TrueCamera can save captured photos to your library.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Grejn needs camera access to capture photos.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Grejn saves captured photos to your library.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Grejn can save captured photos to your library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

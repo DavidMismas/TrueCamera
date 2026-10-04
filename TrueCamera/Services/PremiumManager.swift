@@ -40,14 +40,14 @@ final class PremiumManager: ObservableObject {
             switch self {
             case .all:
                 return [
-                    "Full-resolution Apple ProRAW capture",
+                    "Full-resolution capture where supported",
                     "Live preset preview in the camera view",
                     "Unlimited custom preset saves",
                     "One-time purchase with restore support"
                 ]
             case .fullResolution:
                 return [
-                    "Full-resolution Apple ProRAW capture",
+                    "Full-resolution capture where supported",
                     "Keeps the free 12 MP option available too",
                     "Included in the Grejn Pro unlock"
                 ]
@@ -88,8 +88,14 @@ final class PremiumManager: ObservableObject {
 
     private var bootstrapTask: Task<Void, Never>?
     private var transactionUpdatesTask: Task<Void, Never>?
+    private let forcePremiumAccessForDevelopment: Bool
 
     init(startLiveTasks: Bool = true) {
+        #if DEBUG
+        forcePremiumAccessForDevelopment = startLiveTasks
+        #else
+        forcePremiumAccessForDevelopment = false
+        #endif
         hasPremiumAccess = PremiumAccessStore.readIsPremiumUnlocked()
 
         guard startLiveTasks else { return }
@@ -248,7 +254,7 @@ final class PremiumManager: ObservableObject {
     }
 
     private func applyPremiumState(_ unlocked: Bool, persist: Bool = true) {
-        hasPremiumAccess = unlocked
+        hasPremiumAccess = forcePremiumAccessForDevelopment || unlocked
 
         guard persist else { return }
         PremiumAccessStore.write(isPremiumUnlocked: unlocked)
